@@ -90,7 +90,7 @@ const meta = new Map(); // date -> { date, title, mood, words, snippet, thumb, u
 
 function openDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('daybook', 3);
+    const req = indexedDB.open('daybook', 4);
     req.onupgradeneeded = e => {
       const d = req.result;
       if (e.oldVersion < 1) {
@@ -102,6 +102,7 @@ function openDB() {
         d.createObjectStore('notes', { keyPath: 'id' });
       }
       if (e.oldVersion < 3) d.createObjectStore('deleted', { keyPath: 'key' }); // tombstones, so deletes can sync
+      if (e.oldVersion < 4) d.createObjectStore('weeks', { keyPath: 'week' }); // weekly recap notes + watch lists, keyed by Monday
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -236,7 +237,7 @@ function tradeResult(t) {
   const fees = Number.isFinite(t.fees) ? t.fees : 0;
   const cost = buy * qty * mult;
   const proceeds = sell * qty * mult;
-  const pl = proceeds - cost - fees;
+  const pl = Math.round((proceeds - cost - fees) * 100) / 100;
   return { pl, pct: cost > 0 ? (pl / cost) * 100 : null, cost, proceeds, fees };
 }
 
@@ -253,12 +254,32 @@ function cleanTrade(raw) {
   return t.symbol || t.qty != null || t.buy != null || t.sell != null || t.fees != null ? t : null;
 }
 
+/* An entry holds a list of trades. Entries saved by the first version held a single `trade`. */
+const entryTrades = e => (e ? (Array.isArray(e.trades) ? e.trades : e.trade ? [e.trade] : []) : []);
+const cleanTrades = raw => entryTrades(raw).slice(0, 50).map(cleanTrade).filter(Boolean);
+
+/* taken = every trade logged; closed = those with a sold price, which are the ones that have a result */
+function tradeTotals(trades) {
+  const out = { taken: 0, closed: 0, open: 0, wins: 0, losses: 0, pl: 0 };
+  for (const t of trades) {
+    out.taken++;
+    const r = tradeResult(t);
+    if (!r) { out.open++; continue; }
+    out.closed++;
+    out.pl += r.pl;
+    if (r.pl > 0) out.wins++; else if (r.pl < 0) out.losses++;
+  }
+  out.pl = Math.round(out.pl * 100) / 100;
+  return out;
+}
+
 async function buildMeta(entry) {
   const tmp = document.createElement('div');
   tmp.innerHTML = entry.html;
   tmp.querySelectorAll('p,h2,h3,li,blockquote,figcaption,div,br').forEach(n => n.after(' '));
   const text = (tmp.textContent || '').replace(/\s+/g, ' ').trim();
   const firstImg = tmp.querySelector('img');
+  const tt = tradeTotals(entryTrades(entry));
   return {
     date: entry.date,
     title: entry.title,
@@ -266,8 +287,9 @@ async function buildMeta(entry) {
     words: text ? text.split(' ').length : 0,
     snippet: text.slice(0, 120),
     text,
-    trade: entry.trade ? { type: entry.trade.type, symbol: entry.trade.symbol } : null,
-    pl: (() => { const r = tradeResult(entry.trade); return r ? r.pl : null; })(),
+    taken: tt.taken,
+    closed: tt.closed,
+    pl: tt.closed ? tt.pl : null,
     thumb: firstImg ? await makeThumb(firstImg.getAttribute('src')) : '',
     updated: entry.updated,
   };
@@ -322,9 +344,29 @@ async function render() {
 
   const raw = location.hash.replace(/^#\/?/, '');
   const inNotebook = raw === 'notebook' || raw.startsWith('notebook/');
-  document.getElementById('navJournal').setAttribute('aria-current', inNotebook ? 'false' : 'page');
-  document.getElementById('navNotebook').setAttribute('aria-current', inNotebook ? 'page' : 'false');
+  const inRecap = raw === 'recap' || raw.startsWith('recap/');
+  const inWatch = raw === 'watchlist' || raw.startsWith('watchlist/');
+  const area = inNotebook ? 'navNotebook' : inRecap ? 'navRecap' : inWatch ? 'navWatch' : 'navJournal';
+  for (const id of ['navJournal', 'navNotebook', 'navRecap', 'navWatch']) {
+    document.getElementById(id).setAttribute('aria-current', id === area ? 'page' : 'false');
+  }
   $main.classList.toggle('wide', inNotebook);
+
+  if (inRecap || inWatch) {
+    const key = weekFromHash(raw);
+    const canonical = `#/${inRecap ? 'recap' : 'watchlist'}/${key}`;
+    const page = inRecap ? await recapView(key, token) : watchView(key);
+    if (token !== viewToken || !page) return;
+    // a date in the middle of a week is tidied to that week's Monday, so the address is always the week
+    if (raw.split('/')[1] && location.hash !== canonical) history.replaceState(null, '', canonical);
+    closeDialog();
+    shownBase = null;
+    $main.replaceChildren(...page.nodes);
+    window.scrollTo(0, 0);
+    document.title = `${page.title} · Daybook`;
+    page.mount();
+    return;
+  }
 
   if (inNotebook) {
     const [sid, nid] = raw.split('/').slice(1);
@@ -403,9 +445,9 @@ function statsFor(prefix) {
   for (const [date, mt] of meta) {
     if (!date.startsWith(prefix)) continue;
     entries++; words += mt.words;
-    if (typeof mt.pl === 'number') { pl += mt.pl; trades++; }
+    if (typeof mt.pl === 'number') { pl += mt.pl; trades += mt.closed || 1; }
   }
-  return { entries, words, pl, trades };
+  return { entries, words, pl: Math.round(pl * 100) / 100, trades };
 }
 
 function plClause(pl, n) {
@@ -676,88 +718,154 @@ async function dayView(year, month, day, token) {
       } }),
       h('span', { style: `--c:var(--mood-${mo.v})` }, mo.label))));
 
-  /* trade log */
-  const T0 = stored?.trade || {};
-  let tType = T0.type === 'option' ? 'option' : 'stock';
-  const numField = (id, val, ph) => {
-    const el = h('input', { type: 'text', inputmode: 'decimal', id, autocomplete: 'off', placeholder: ph });
-    el.value = val == null ? '' : String(val);
-    return el;
-  };
-  const fSymbol = h('input', { type: 'text', id: 'trSymbol', maxlength: 12, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', placeholder: 'e.g. SOFI' });
-  fSymbol.value = T0.symbol || '';
-  const fQty = numField('trQty', T0.qty, '0');
-  const fBuy = numField('trBuy', T0.buy, '0.00');
-  const fSell = numField('trSell', T0.sell, '0.00');
-  const fFees = numField('trFees', T0.fees, '0.00');
-  const lblQty = h('label', { for: 'trQty' });
-  const lblBuy = h('label', { for: 'trBuy' });
-  const lblSell = h('label', { for: 'trSell' });
-  const tradeHint = h('p', { class: 'trade-hint', id: 'trHint' });
-  const tradeOut = h('div', { class: 'trade-out', role: 'status', 'aria-live': 'polite' });
-  const tradeBadge = h('span', { class: 'trade-badge' });
-  const typeRadios = [['stock', 'Stock'], ['option', 'Options']].map(([v, label]) => h('label', null,
-    h('input', { type: 'radio', name: 'tradeType', value: v, checked: tType === v, onchange: () => { tType = v; tradeChanged(); } }),
-    h('span', null, label)));
-
+  /* trade log: any number of trades for the day */
   const parseNum = el => {
     const t = el.value.replace(/[$,\s]/g, '');
     if (t === '') return null;
     const n = Number(t);
     return Number.isFinite(n) && n >= 0 ? n : NaN;
   };
-  function readTrade() {
-    const vals = { qty: parseNum(fQty), buy: parseNum(fBuy), sell: parseNum(fSell), fees: parseNum(fFees) };
-    return cleanTrade({ type: tType, symbol: fSymbol.value, ...Object.fromEntries(Object.entries(vals).map(([k, v]) => [k, Number.isNaN(v) ? null : v])) });
+  const rows = [];
+  let rowSeq = 0;
+  const tradeList = h('div', { class: 'trade-list' });
+  const tradeTotal = h('div', { class: 'trade-out', role: 'status', 'aria-live': 'polite' });
+  const tradeBadge = h('span', { class: 'trade-badge' });
+  const tradeHint = h('p', { class: 'trade-hint', id: 'trHint' },
+    'Log every trade you took today. Leave the sold price empty if you still hold it, or type the price you are aiming for to see the potential result. Options are priced per share and one contract covers 100 shares.');
+  const readTrades = () => rows.map(r => r.read()).filter(Boolean);
+
+  function makeTradeRow(t0) {
+    const id = ++rowSeq;
+    let type = t0.type === 'option' ? 'option' : 'stock';
+    const numField = (name, val, ph) => {
+      const el = h('input', { type: 'text', inputmode: 'decimal', id: `${name}${id}`, autocomplete: 'off', placeholder: ph, 'aria-describedby': 'trHint' });
+      el.value = val == null ? '' : String(val);
+      el.addEventListener('input', changed);
+      return el;
+    };
+    const fSymbol = h('input', { type: 'text', id: `trSymbol${id}`, maxlength: 12, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', placeholder: 'e.g. SOFI', 'aria-describedby': 'trHint' });
+    fSymbol.value = t0.symbol || '';
+    fSymbol.addEventListener('input', () => { fSymbol.value = fSymbol.value.toUpperCase(); changed(); });
+    const fQty = numField('trQty', t0.qty, '0');
+    const fBuy = numField('trBuy', t0.buy, '0.00');
+    const fSell = numField('trSell', t0.sell, '0.00');
+    const fFees = numField('trFees', t0.fees, '0.00');
+    const lblQty = h('label', { for: `trQty${id}` });
+    const lblBuy = h('label', { for: `trBuy${id}` });
+    const lblSell = h('label', { for: `trSell${id}` });
+    const out = h('div', { class: 'trade-out', role: 'status', 'aria-live': 'polite' });
+    const heading = h('strong', { class: 'trade-row-title' });
+    const field = (lbl, el) => h('div', { class: 'field' }, lbl, el);
+    const typeRadios = [['stock', 'Stock'], ['option', 'Options']].map(([v, label]) => h('label', null,
+      h('input', { type: 'radio', name: `tradeType${id}`, value: v, checked: type === v, onchange: () => { type = v; changed(); } }),
+      h('span', null, label)));
+    const removeBtn = h('button', { class: 'icon-btn bordered', type: 'button', html: ICON.trash, onclick: () => removeRow(row) });
+    const el = h('div', { class: 'trade-row', role: 'group' },
+      h('div', { class: 'trade-row-head' },
+        heading,
+        h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'What did you trade?' }, typeRadios),
+        removeBtn),
+      h('div', { class: 'trade-grid' },
+        field(h('label', { for: `trSymbol${id}` }, 'Symbol'), fSymbol),
+        field(lblQty, fQty), field(lblBuy, fBuy), field(lblSell, fSell),
+        field(h('label', { for: `trFees${id}` }, 'Fees (optional)'), fFees)),
+      out);
+
+    const inputs = [fQty, fBuy, fSell, fFees];
+    const row = {
+      el,
+      read() {
+        const vals = Object.fromEntries(['qty', 'buy', 'sell', 'fees'].map((k, i) => { const v = parseNum(inputs[i]); return [k, Number.isNaN(v) ? null : v]; }));
+        return cleanTrade({ type, symbol: fSymbol.value, ...vals });
+      },
+      focus() { fSymbol.focus(); },
+      label(i) {
+        heading.textContent = `Trade ${i + 1}`;
+        el.setAttribute('aria-label', `Trade ${i + 1}`);
+        removeBtn.setAttribute('aria-label', `Remove trade ${i + 1}`);
+        removeBtn.title = `Remove trade ${i + 1}`;
+      },
+      render() {
+        const opt = type === 'option';
+        lblQty.textContent = opt ? 'Contracts' : 'Shares';
+        lblBuy.textContent = opt ? 'Bought price per share' : 'Bought price';
+        lblSell.textContent = opt ? 'Sold price per share' : 'Sold price';
+        let bad = false;
+        for (const f of inputs) {
+          const isBad = Number.isNaN(parseNum(f));
+          f.setAttribute('aria-invalid', isBad ? 'true' : 'false');
+          bad = bad || isBad;
+        }
+        const t = row.read();
+        const r = tradeResult(t);
+        out.className = 'trade-out' + (r ? (r.pl > 0 ? ' win' : r.pl < 0 ? ' loss' : '') : '');
+        if (bad) { out.replaceChildren('Use numbers only, like 12.50. Commas and a $ sign are fine.'); return; }
+        if (r) {
+          out.replaceChildren(
+            h('strong', { class: 'trade-big' }, `${r.pl < 0 ? 'Loss' : r.pl > 0 ? 'Profit' : 'Break-even'} ${money(r.pl)}`,
+              r.pct != null ? ` (${r.pct > 0 ? '+' : r.pct < 0 ? '−' : ''}${Math.abs(r.pct).toFixed(1)}%)` : ''),
+            h('span', { class: 'trade-detail' }, `Paid ${money(r.cost)} · Received ${money(r.proceeds)}${r.fees ? ' · Fees ' + money(r.fees) : ''}`));
+        } else if (t && t.qty && t.buy != null) {
+          out.replaceChildren(`Position cost ${money(t.buy * t.qty * optionMultiplier(type))}. Add a sold price to see profit or loss.`);
+        } else {
+          out.replaceChildren(`Fill in ${opt ? 'contracts' : 'shares'}, bought price and sold price to see profit or loss.`);
+        }
+      },
+    };
+    function changed() { row.render(); renderTradeTotals(); queueSave(); }
+    return row;
   }
-  function renderTrade() {
-    const opt = tType === 'option';
-    lblQty.textContent = opt ? 'Contracts' : 'Shares';
-    lblBuy.textContent = opt ? 'Bought price per share' : 'Bought price';
-    lblSell.textContent = opt ? 'Sold price per share' : 'Sold price';
-    tradeHint.textContent = opt
-      ? 'Option prices are quoted per share, and one contract covers 100 shares, so the total is price × contracts × 100.'
-      : 'Leave sold price empty if you still hold it. Type the price you are aiming for to see the potential result.';
-    let bad = false;
-    for (const el of [fQty, fBuy, fSell, fFees]) {
-      const isBad = Number.isNaN(parseNum(el));
-      el.setAttribute('aria-invalid', isBad ? 'true' : 'false');
-      bad = bad || isBad;
-    }
-    const t = readTrade();
-    const r = tradeResult(t);
-    const tone = r ? (r.pl > 0 ? ' win' : r.pl < 0 ? ' loss' : '') : '';
-    tradeOut.className = 'trade-out' + tone;
+
+  function addRow(t0, focus) {
+    const row = makeTradeRow(t0 || {});
+    rows.push(row);
+    tradeList.append(row.el);
+    relabelRows();
+    row.render();
+    renderTradeTotals();
+    if (focus) row.focus();
+  }
+
+  function removeRow(row) {
+    const i = rows.indexOf(row);
+    if (i === -1) return;
+    rows.splice(i, 1);
+    row.el.remove();
+    if (!rows.length) addRow({}, false);
+    relabelRows();
+    renderTradeTotals();
+    queueSave();
+  }
+
+  function relabelRows() {
+    rows.forEach((r, i) => r.label(i));
+    tradeList.classList.toggle('single', rows.length === 1);
+  }
+
+  function renderTradeTotals() {
+    const tt = tradeTotals(readTrades());
+    const tone = tt.closed ? (tt.pl > 0 ? ' win' : tt.pl < 0 ? ' loss' : '') : '';
+    const verdict = tt.pl < 0 ? 'Loss' : tt.pl > 0 ? 'Profit' : 'Even';
     tradeBadge.className = 'trade-badge' + tone;
-    tradeBadge.textContent = r ? `${r.pl < 0 ? 'Loss' : r.pl > 0 ? 'Profit' : 'Even'} ${money(r.pl)}` : '';
-    if (bad) { tradeOut.replaceChildren('Use numbers only, like 12.50. Commas and a $ sign are fine.'); return; }
-    if (r) {
-      tradeOut.replaceChildren(
-        h('strong', { class: 'trade-big' }, `${r.pl < 0 ? 'Loss' : r.pl > 0 ? 'Profit' : 'Break-even'} ${money(r.pl)}`,
-          r.pct != null ? ` (${r.pct > 0 ? '+' : r.pct < 0 ? '−' : ''}${Math.abs(r.pct).toFixed(1)}%)` : ''),
-        h('span', { class: 'trade-detail' }, `Paid ${money(r.cost)} · Received ${money(r.proceeds)}${r.fees ? ' · Fees ' + money(r.fees) : ''}`));
-    } else if (t && t.qty && t.buy != null) {
-      tradeOut.replaceChildren(`Position cost ${money(t.buy * t.qty * optionMultiplier(tType))}. Add a sold price to see profit or loss.`);
-    } else {
-      tradeOut.replaceChildren(`Fill in ${opt ? 'contracts' : 'shares'}, bought price and sold price to see profit or loss.`);
-    }
+    tradeBadge.textContent = tt.taken ? plural(tt.taken, 'trade', 'trades') + (tt.closed ? ` · ${verdict} ${money(tt.pl)}` : '') : '';
+    tradeTotal.hidden = tt.taken < 2;
+    tradeTotal.className = 'trade-out' + tone;
+    if (tt.taken < 2) return;
+    tradeTotal.replaceChildren(
+      h('strong', { class: 'trade-big' }, tt.closed ? `Day total: ${verdict} ${money(tt.pl)}` : 'Day total: no closed trades yet'),
+      h('span', { class: 'trade-detail' },
+        `${plural(tt.taken, 'trade', 'trades')} · ${tt.wins} won · ${tt.losses} lost${tt.open ? ` · ${tt.open} still open` : ''}`));
   }
-  function tradeChanged() { renderTrade(); queueSave(); }
-  [fSymbol, fQty, fBuy, fSell, fFees].forEach(el => el.addEventListener('input', tradeChanged));
-  fSymbol.addEventListener('input', () => { fSymbol.value = fSymbol.value.toUpperCase(); });
-  const fieldBox = (lbl, el) => h('div', { class: 'field' }, lbl, el);
-  const tradeSection = h('details', { class: 'trade', open: !!stored?.trade },
+
+  const initialTrades = entryTrades(stored);
+  const tradeSection = h('details', { class: 'trade', open: initialTrades.length > 0 },
     h('summary', null, h('span', null, 'Trade log'), h('span', { class: 'trade-opt' }, 'optional'), tradeBadge),
     h('div', { class: 'trade-body' },
-      h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'What did you trade?' }, typeRadios),
-      h('div', { class: 'trade-grid' },
-        fieldBox(h('label', { for: 'trSymbol' }, 'Symbol'), fSymbol),
-        fieldBox(lblQty, fQty),
-        fieldBox(lblBuy, fBuy),
-        fieldBox(lblSell, fSell),
-        fieldBox(h('label', { for: 'trFees' }, 'Fees (optional)'), fFees)),
-      tradeHint, tradeOut));
-  tradeSection.querySelectorAll('input[type="text"]').forEach(el => el.setAttribute('aria-describedby', 'trHint'));
+      tradeHint, tradeList,
+      h('div', { class: 'trade-actions' },
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: () => addRow({}, true) }, h('span', { html: ICON.plus }), 'Add another trade')),
+      tradeTotal));
+  (initialTrades.length ? initialTrades : [{}]).forEach(t => addRow(t, false));
 
   /* editor */
   const body = h('div', {
@@ -1019,8 +1127,8 @@ async function dayView(year, month, day, token) {
     if (!dirty) return;
     dirty = false;
     const html = serialize();
-    const entry = { date, title: titleInput.value.trim(), mood, html, trade: readTrade(), updated: Date.now() };
-    const hasContent = entry.title || mood || entry.trade || /<img/.test(html) || (body.textContent || '').trim();
+    const entry = { date, title: titleInput.value.trim(), mood, html, trades: readTrades(), updated: Date.now() };
+    const hasContent = entry.title || mood || entry.trades.length || /<img/.test(html) || (body.textContent || '').trim();
     try {
       if (!hasContent) {
         await removeEntry(date);
@@ -1137,7 +1245,6 @@ async function dayView(year, month, day, token) {
   };
 
   updateEmptyState();
-  renderTrade();
 
   requestAnimationFrame(fitTitle);
   window.addEventListener('resize', fitTitle);
@@ -1529,6 +1636,327 @@ function notebookView(sid, nid) {
   };
 }
 
+/* ---------- Weeks: recap and watch list ---------- */
+/* One record per week, keyed by that week's Monday: { week, recap, watch: [{ id, symbol, note, done }], updated }.
+   The recap's trade counts and profit or loss are never stored. They are worked out from the
+   journal entries every time the page opens, so they can't drift from what you wrote. */
+
+const weeks = new Map(); // monday key -> record
+const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_WATCH = 100;
+
+function weekOf(y, m, d) {
+  const dow = (new Date(y, m - 1, d).getDay() + 6) % 7;
+  const t = new Date(y, m - 1, d - dow);
+  return keyOf(t.getFullYear(), t.getMonth() + 1, t.getDate());
+}
+const partsOf = key => { const [y, m, d] = key.split('-').map(Number); return { y, m, d }; };
+const addDays = (key, n) => { const p = partsOf(key); const s = shiftDay(p.y, p.m, p.d, n); return keyOf(s.y, s.m, s.d); };
+const thisWeek = () => { const t = todayParts(); return weekOf(t.y, t.m, t.d); };
+
+function weekLabel(key) {
+  const a = partsOf(key);
+  const b = partsOf(addDays(key, 6));
+  const fmt = (p, withYear) => `${p.d} ${MONTHS[p.m - 1].slice(0, 3)}${withYear ? ' ' + p.y : ''}`;
+  return `${fmt(a, a.y !== b.y)} – ${fmt(b, true)}`;
+}
+
+/* #/recap and #/watchlist show this week; #/recap/2026-10-07 shows the week that date falls in */
+function weekFromHash(raw) {
+  const part = raw.split('/')[1] || '';
+  if (DATE_KEY.test(part)) {
+    const { y, m, d } = partsOf(part);
+    if (y >= 1900 && y <= 2999 && m >= 1 && m <= 12 && d >= 1 && d <= daysIn(y, m)) return weekOf(y, m, d);
+  }
+  return thisWeek();
+}
+
+const cleanSymbol = s => String(s || '').toUpperCase().replace(/[^A-Z0-9. -]/g, '').slice(0, 12);
+
+function cleanWatch(list) {
+  const seen = new Set();
+  return (Array.isArray(list) ? list : []).slice(0, MAX_WATCH).map(r => {
+    if (!r || typeof r !== 'object') return null;
+    const symbol = cleanSymbol(r.symbol);
+    const note = String(r.note || '').slice(0, 500);
+    if (!symbol && !note.trim()) return null;
+    const id = validId(r.id) && !seen.has(r.id) ? r.id : newId();
+    seen.add(id);
+    return { id, symbol, note, done: r.done === true };
+  }).filter(Boolean);
+}
+
+const cleanWeek = (raw, week, updated) => ({ week, recap: String(raw.recap || '').slice(0, 20000), watch: cleanWatch(raw.watch), updated });
+const weekRecord = key => weeks.get(key) || { week: key, recap: '', watch: [], updated: 0 };
+
+function saveWeek(rec) {
+  rec.updated = Date.now();
+  weeks.set(rec.week, rec);
+  return dbPut('weeks', rec);
+}
+
+const signed = n => `${n < 0 ? '−' : n > 0 ? '+' : ''}${money(n)}`;
+const toneOf = n => (n > 0 ? 'win' : n < 0 ? 'loss' : '');
+
+function weekHead(kind, key, extra) {
+  const root = kind === 'recap' ? '#/recap' : '#/watchlist';
+  const prev = addDays(key, -7);
+  const next = addDays(key, 7);
+  const now = key === thisWeek();
+  return h('div', { class: 'page-head' },
+    h('div', null,
+      h('h1', null, kind === 'recap' ? 'Weekly recap' : 'Weekly watch list'),
+      h('p', { class: 'page-sub' }, weekLabel(key), now ? ' · This week' : '', extra || null)),
+    h('div', { class: 'stepper' },
+      stepBtn(`${root}/${prev}`, `Previous week, ${weekLabel(prev)}`, ICON.left),
+      now ? null : h('a', { class: 'btn btn-sm', href: root }, 'This week'),
+      stepBtn(`${root}/${next}`, `Next week, ${weekLabel(next)}`, ICON.right)));
+}
+
+/* A small autosaving field shared by the recap note: returns { persist, dirty() } */
+function autosaver(save, statusEl) {
+  let dirty = false;
+  let timer;
+  const run = async () => {
+    clearTimeout(timer);
+    if (!dirty) return;
+    dirty = false;
+    try { await save(); statusEl.textContent = 'Saved'; } catch (err) {
+      dirty = true;
+      statusEl.textContent = 'Not saved';
+      toast(err && err.name === 'QuotaExceededError'
+        ? 'Not saved: browser storage is full. Download a backup and remove some photos.'
+        : 'Not saved. Check that your browser allows site storage.');
+    }
+  };
+  return {
+    run,
+    touch() { dirty = true; statusEl.textContent = 'Saving…'; clearTimeout(timer); timer = setTimeout(run, SAVE_DELAY); },
+    pending: () => dirty,
+  };
+}
+
+function hookPageHide(saver) {
+  const onHide = () => { if (saver.pending() && document.hidden) saver.run(); };
+  const onUnload = () => { if (saver.pending()) saver.run(); };
+  document.addEventListener('visibilitychange', onHide);
+  window.addEventListener('pagehide', onUnload);
+  return () => { document.removeEventListener('visibilitychange', onHide); window.removeEventListener('pagehide', onUnload); };
+}
+
+/* ---------- Weekly recap ---------- */
+
+async function recapView(key, token) {
+  const days = Array.from({ length: 7 }, (_, i) => addDays(key, i));
+  const entries = await Promise.all(days.map(getEntry));
+  if (token !== viewToken) return null;
+
+  const rec = weekRecord(key);
+  const dayTrades = entries.map(entryTrades);
+  const total = tradeTotals(dayTrades.flat());
+  const winRate = total.closed ? Math.round((total.wins / total.closed) * 100) : null;
+  const evens = total.closed - total.wins - total.losses;
+
+  const tile = (label, value, sub, tone) => h('div', { class: ['stat', tone || ''].join(' ').trim() },
+    h('span', { class: 'stat-label' }, label),
+    h('strong', { class: 'stat-value' }, value),
+    sub ? h('span', { class: 'stat-sub' }, sub) : null);
+
+  const stats = h('div', { class: 'stats' },
+    tile('Trades taken', String(total.taken),
+      total.taken ? `${total.closed} closed${total.open ? ` · ${total.open} still open` : ''}` : 'None logged this week'),
+    tile('Net result', total.closed ? signed(total.pl) : '—',
+      total.closed ? (total.pl > 0 ? 'Profit' : total.pl < 0 ? 'Loss' : 'Break-even') : 'Needs a closed trade', toneOf(total.pl)),
+    tile('Winners / losers', `${total.wins} / ${total.losses}`, evens ? `${evens} break-even` : total.closed ? `${plural(total.closed, 'closed trade', 'closed trades')}` : ''),
+    tile('Win rate', winRate == null ? '—' : `${winRate}%`, total.closed ? `of ${plural(total.closed, 'closed trade', 'closed trades')}` : ''));
+
+  /* day by day */
+  const dayRows = days.map((dk, i) => {
+    const e = entries[i];
+    const tt = tradeTotals(dayTrades[i]);
+    const p = partsOf(dk);
+    const snippet = meta.get(dk)?.snippet;
+    return h('tr', null,
+      h('th', { scope: 'row' }, h('a', { href: `#/${p.y}/${p.m}/${p.d}` }, `${WEEKDAYS[i].slice(0, 3)} ${p.d} ${MONTHS[p.m - 1].slice(0, 3)}`)),
+      h('td', { class: 'recap-title' }, e ? (e.title || snippet || 'Untitled entry') : h('span', { class: 'muted' }, 'No entry')),
+      h('td', { class: 'num' }, tt.taken ? String(tt.taken) : '—'),
+      h('td', { class: ['num', toneOf(tt.pl)].join(' ').trim() }, tt.closed ? signed(tt.pl) : '—'));
+  });
+  const dayTable = h('table', { class: 'recap-table' },
+    h('caption', { class: 'sr-only' }, `Day by day, ${weekLabel(key)}`),
+    h('thead', null, h('tr', null,
+      h('th', { scope: 'col' }, 'Day'), h('th', { scope: 'col', class: 'recap-title' }, 'Journal entry'),
+      h('th', { scope: 'col', class: 'num' }, 'Trades'), h('th', { scope: 'col', class: 'num' }, 'Result'))),
+    h('tbody', null, dayRows),
+    h('tfoot', null, h('tr', null,
+      h('th', { scope: 'row' }, 'Week total'), h('td', { class: 'recap-title' }),
+      h('td', { class: 'num' }, String(total.taken)),
+      h('td', { class: ['num', toneOf(total.pl)].join(' ').trim() }, total.closed ? signed(total.pl) : '—'))));
+
+  /* every trade */
+  const tradeRows = [];
+  dayTrades.forEach((list, i) => list.forEach(t => {
+    const r = tradeResult(t);
+    const p = partsOf(days[i]);
+    const opt = t.type === 'option';
+    tradeRows.push(h('tr', null,
+      h('th', { scope: 'row' }, h('a', { href: `#/${p.y}/${p.m}/${p.d}` }, `${WEEKDAYS[i].slice(0, 3)} ${p.d}`)),
+      h('td', null, t.symbol || '—'),
+      h('td', null, opt ? 'Option' : 'Stock'),
+      h('td', { class: 'num' }, t.qty != null ? `${fmtNum(t.qty)} ${opt ? (t.qty === 1 ? 'contract' : 'contracts') : (t.qty === 1 ? 'share' : 'shares')}` : '—'),
+      h('td', { class: 'num' }, t.buy != null ? money(t.buy) : '—'),
+      h('td', { class: 'num' }, t.sell != null ? money(t.sell) : '—'),
+      h('td', { class: ['num', r ? toneOf(r.pl) : 'muted'].join(' ').trim() }, r ? signed(r.pl) : 'Open')));
+  }));
+  const tradeTable = tradeRows.length ? h('table', { class: 'recap-table' },
+    h('caption', { class: 'sr-only' }, `Every trade, ${weekLabel(key)}`),
+    h('thead', null, h('tr', null, ['Day', 'Symbol', 'Type', 'Size', 'Bought', 'Sold', 'Result'].map((t, i) =>
+      h('th', { scope: 'col', class: i > 2 ? 'num' : '' }, t)))),
+    h('tbody', null, tradeRows)) : null;
+
+  /* the week in your own words */
+  const status = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' }, rec.recap ? 'Saved' : '');
+  const note = h('textarea', {
+    class: 'recap-note', id: 'recapNote', rows: 7, maxlength: 20000, spellcheck: 'true',
+    placeholder: 'What happened this week? What worked, what did not, and what will you do differently?',
+  });
+  note.value = rec.recap;
+  const saver = autosaver(async () => { rec.recap = note.value; await saveWeek(rec); }, status);
+  note.addEventListener('input', () => saver.touch());
+  const unhook = hookPageHide(saver);
+  activeEditor = { async flush() { unhook(); await saver.run(); } };
+
+  const nextWeek = addDays(key, 7);
+  const nodes = [
+    weekHead('recap', key),
+    stats,
+    h('h2', { class: 'section-head' }, 'Day by day'),
+    h('div', { class: 'table-wrap' }, dayTable),
+    total.taken ? h('h2', { class: 'section-head' }, `Every trade (${total.taken})`) : null,
+    tradeTable ? h('div', { class: 'table-wrap' }, tradeTable) : null,
+    !total.taken ? h('p', { class: 'recap-empty' },
+      'No trades logged for this week yet. Open a day in your journal, expand Trade log, and add what you traded. The totals above fill in on their own.') : null,
+    h('div', { class: 'section-head-row' },
+      h('h2', { class: 'section-head', id: 'recapNoteHead' }, 'The week in your words'), status),
+    h('label', { class: 'sr-only', for: 'recapNote' }, 'The week in your words'),
+    note,
+    h('div', { class: 'recap-links' },
+      h('a', { class: 'btn', href: `#/watchlist/${nextWeek}` }, 'Plan next week’s watch list'),
+      h('a', { class: 'btn', href: `#/watchlist/${key}` }, 'This week’s watch list')),
+  ];
+  return { nodes: nodes.filter(Boolean), title: `Recap ${weekLabel(key)}`, mount() { $main.focus({ preventScroll: true }); } };
+}
+
+/* ---------- Weekly watch list ---------- */
+
+function watchView(key) {
+  const rec = weekRecord(key);
+  const list = rec.watch.map(x => ({ ...x }));
+  const status = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' }, list.length ? 'Saved' : '');
+  const saver = autosaver(async () => {
+    rec.watch = cleanWatch(list);
+    await saveWeek(rec);
+  }, status);
+  const changed = () => { updateSummary(); saver.touch(); };
+  const unhook = hookPageHide(saver);
+  activeEditor = { async flush() { unhook(); await saver.run(); } };
+
+  const summary = h('p', { class: 'watch-summary' });
+  const ul = h('ul', { class: 'watch-list' });
+  const empty = h('p', { class: 'recap-empty' }, 'Nothing on this week’s list yet. Add the symbols you want to watch, with the level or the reason.');
+  const carry = h('button', { class: 'btn btn-sm', type: 'button' }, 'Carry over from last week');
+
+  const carryCandidates = () => {
+    const have = new Set(list.map(x => x.symbol).filter(Boolean));
+    return weekRecord(addDays(key, -7)).watch.filter(x => x.symbol && !x.done && !have.has(x.symbol));
+  };
+
+  function updateSummary() {
+    const real = list.filter(x => x.symbol || x.note.trim());
+    const done = real.filter(x => x.done).length;
+    summary.textContent = real.length ? `${plural(real.length, 'ticker', 'tickers')} · ${done} done` : '';
+    empty.hidden = list.length > 0;
+    const c = carryCandidates();
+    carry.hidden = !c.length;
+    carry.textContent = c.length ? `Carry over ${plural(c.length, 'ticker', 'tickers')} from last week` : '';
+  }
+
+  function rowFor(item) {
+    const li = h('li', { class: 'watch-item' + (item.done ? ' done' : '') });
+    const done = h('input', {
+      type: 'checkbox', checked: item.done, 'aria-label': 'Done with this one',
+      onchange: e => { item.done = e.target.checked; li.classList.toggle('done', item.done); changed(); },
+    });
+    const sym = h('input', {
+      class: 'watch-symbol', type: 'text', maxlength: 12, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false',
+      placeholder: 'Symbol', 'aria-label': 'Symbol',
+    });
+    sym.value = item.symbol;
+    sym.addEventListener('input', () => { sym.value = sym.value.toUpperCase(); item.symbol = cleanSymbol(sym.value); changed(); });
+    const note = h('input', {
+      class: 'watch-note', type: 'text', maxlength: 500, autocomplete: 'off', spellcheck: 'true',
+      placeholder: 'Level, setup or reason', 'aria-label': 'Notes for this ticker',
+    });
+    note.value = item.note;
+    note.addEventListener('input', () => { item.note = note.value; changed(); });
+    const del = h('button', {
+      class: 'icon-btn bordered', type: 'button', html: ICON.trash, 'aria-label': 'Remove from list', title: 'Remove from list',
+      onclick: () => { list.splice(list.indexOf(item), 1); renderList(); changed(); },
+    });
+    li.append(done, sym, note, del);
+    return li;
+  }
+
+  function renderList() {
+    ul.replaceChildren(...list.map(rowFor));
+    updateSummary();
+  }
+
+  const addSymbol = h('input', {
+    id: 'watchAddSymbol', class: 'watch-symbol', type: 'text', maxlength: 12, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false',
+    placeholder: 'Symbol', 'aria-label': 'Symbol to add',
+  });
+  addSymbol.addEventListener('input', () => { addSymbol.value = addSymbol.value.toUpperCase(); });
+  const addNote = h('input', {
+    class: 'watch-note', type: 'text', maxlength: 500, autocomplete: 'off', spellcheck: 'true',
+    placeholder: 'Level, setup or reason (optional)', 'aria-label': 'Notes for the ticker to add',
+  });
+  const addForm = h('form', { class: 'watch-add', 'aria-label': 'Add a ticker' }, addSymbol, addNote,
+    h('button', { class: 'btn btn-primary', type: 'submit' }, h('span', { html: ICON.plus }), 'Add'));
+  addForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const symbol = cleanSymbol(addSymbol.value);
+    const text = addNote.value.trim();
+    if (!symbol && !text) { addSymbol.focus(); return; }
+    if (list.length >= MAX_WATCH) { toast(`A week's list holds up to ${MAX_WATCH} tickers.`); return; }
+    list.push({ id: newId(), symbol, note: text, done: false });
+    addSymbol.value = '';
+    addNote.value = '';
+    renderList();
+    changed();
+    addSymbol.focus();
+  });
+  carry.addEventListener('click', () => {
+    const c = carryCandidates().slice(0, MAX_WATCH - list.length);
+    c.forEach(x => list.push({ id: newId(), symbol: x.symbol, note: x.note, done: false }));
+    renderList();
+    changed();
+    toast(`Carried over ${plural(c.length, 'ticker', 'tickers')}`);
+  });
+
+  renderList();
+  const nodes = [
+    weekHead('watch', key),
+    addForm,
+    h('div', { class: 'watch-bar' }, summary, h('span', { class: 'nb-spacer' }), carry, status),
+    ul,
+    empty,
+    h('div', { class: 'recap-links' },
+      h('a', { class: 'btn', href: `#/recap/${key}` }, 'See this week’s recap')),
+  ];
+  return { nodes, title: `Watch list ${weekLabel(key)}`, mount() { $main.focus({ preventScroll: true }); } };
+}
+
 /* ---------- Sync (Cloudflare Pages Functions + KV) ---------- */
 /* Each record syncs on its own, newest edit wins. Keys: e:<date>, s:<id>, n:<id>.
    If the /api isn't reachable (opened from a file, not set up yet) the app simply stays local. */
@@ -1543,6 +1971,7 @@ let lastSync = 0;
 
 function setSync(text, tone) {
   $sync.textContent = text;
+  $sync.title = text;
   $sync.dataset.tone = tone || '';
 }
 
@@ -1568,6 +1997,10 @@ async function pushItem(key, l) {
     const e = await getEntry(key.slice(2));
     if (!e) return;
     body = { updated: e.updated, data: e };
+  } else if (key[0] === 'w') {
+    const x = weeks.get(key.slice(2));
+    if (!x) return;
+    body = { updated: x.updated || 0, data: x };
   } else if (key[0] === 's') {
     const x = nbSections.find(v => v.id === key.slice(2));
     if (!x) return;
@@ -1596,6 +2029,9 @@ async function applyRemote(key, res) {
         tx.objectStore('deleted').put({ key, updated });
       });
       meta.delete(id);
+    } else if (kind === 'w') {
+      await dbWrite(['weeks', 'deleted'], tx => { tx.objectStore('weeks').delete(id); tx.objectStore('deleted').put({ key, updated }); });
+      weeks.delete(id);
     } else if (kind === 's') {
       await dbWrite(['sections', 'deleted'], tx => { tx.objectStore('sections').delete(id); tx.objectStore('deleted').put({ key, updated }); });
       const at = nbSections.findIndex(v => v.id === id);
@@ -1614,12 +2050,17 @@ async function applyRemote(key, res) {
       title: String(raw.title || '').slice(0, 120),
       mood: [1, 2, 3, 4, 5].includes(raw.mood) ? raw.mood : 0,
       html: cleanHTML(raw.html),
-      trade: cleanTrade(raw.trade),
+      trades: cleanTrades(raw),
       updated,
     };
     const m = await buildMeta(entry);
     await putEntry(entry, m);
     meta.set(id, m);
+  } else if (kind === 'w') {
+    if (!DATE_KEY.test(id) || raw.week !== id) return;
+    const rec = cleanWeek(raw, id, updated);
+    await dbPut('weeks', rec);
+    weeks.set(id, rec);
   } else if (kind === 's') {
     if (!validId(id) || raw.id !== id) return;
     const sec = {
@@ -1661,6 +2102,7 @@ async function syncNow() {
     for (const m of meta.values()) local.set(`e:${m.date}`, { updated: m.updated || 0 });
     for (const x of nbSections) local.set(`s:${x.id}`, { updated: x.updated || x.created || 0 });
     for (const x of nbNotes.values()) local.set(`n:${x.id}`, { updated: x.updated || 0 });
+    for (const x of weeks.values()) local.set(`w:${x.week}`, { updated: x.updated || 0 });
     for (const t of await dbAll('deleted')) {
       const cur = local.get(t.key);
       if (!cur || t.updated >= cur.updated) local.set(t.key, { updated: t.updated, deleted: true });
@@ -1712,11 +2154,12 @@ setInterval(() => { if (!document.hidden && Date.now() - lastSync > 300000) sync
 
 async function exportAll() {
   const all = await getAllEntries();
-  if (!all.length && !nbSections.length) { toast('Nothing to back up yet. Write an entry or add a notebook section first.'); return; }
+  if (!all.length && !nbSections.length && !weeks.size) { toast('Nothing to back up yet. Write an entry or add a notebook section first.'); return; }
   const notes = [...nbNotes.values()];
   const blob = new Blob([JSON.stringify({
-    app: 'daybook', version: 2, exported: new Date().toISOString(), entries: all,
+    app: 'daybook', version: 3, exported: new Date().toISOString(), entries: all,
     notebook: { sections: nbSections, notes },
+    weeks: [...weeks.values()],
   })], { type: 'application/json' });
   const t = todayParts();
   const a = h('a', { href: URL.createObjectURL(blob), download: `daybook-backup-${keyOf(t.y, t.m, t.d)}.json` });
@@ -1744,7 +2187,7 @@ $importPicker.addEventListener('change', async () => {
         title: String(raw.title || '').slice(0, 120),
         mood: [1, 2, 3, 4, 5].includes(raw.mood) ? raw.mood : 0,
         html: cleanHTML(raw.html),
-        trade: cleanTrade(raw.trade),
+        trades: cleanTrades(raw),
         updated: Number(raw.updated) || Date.now(),
       };
       const m = await buildMeta(entry);
@@ -1788,7 +2231,19 @@ $importPicker.addEventListener('change', async () => {
       nbNotes.set(n.id, n);
       topics++;
     }
-    toast(`Restored ${plural(count, 'entry', 'entries')}, ${plural(topics, 'topic', 'topics')}`);
+    // weeks: the newer copy of each week's recap and watch list wins
+    let weekCount = 0;
+    for (const raw of Array.isArray(data.weeks) ? data.weeks : []) {
+      if (!raw || !DATE_KEY.test(raw.week)) continue;
+      const existing = weeks.get(raw.week);
+      const updated = Number(raw.updated) || Date.now();
+      if (existing && existing.updated >= updated) continue;
+      const rec = cleanWeek(raw, raw.week, updated);
+      await dbPut('weeks', rec);
+      weeks.set(rec.week, rec);
+      weekCount++;
+    }
+    toast(`Restored ${plural(count, 'entry', 'entries')}, ${plural(topics, 'topic', 'topics')}, ${plural(weekCount, 'week', 'weeks')}`);
     render();
   } catch {
     toast("That file isn't a Daybook backup. Choose a .json file saved with “Download backup”.");
@@ -1829,7 +2284,8 @@ document.getElementById('themeBtn').addEventListener('click', () => {
     db = await openDB();
     for (const m of await getAllMeta()) meta.set(m.date, m);
     // entries saved by an earlier version have no searchable text yet
-    if ([...meta.values()].some(m => m.text == null)) {
+    // (and entries saved before multiple trades per day need their trade counts worked out)
+    if ([...meta.values()].some(m => m.text == null || m.closed == null)) {
       for (const entry of await getAllEntries()) {
         const m = await buildMeta(entry);
         await putEntry(entry, m);
@@ -1838,6 +2294,7 @@ document.getElementById('themeBtn').addEventListener('click', () => {
     }
     nbSections.push(...(await dbAll('sections')).sort((a, b) => a.order - b.order));
     for (const n of await dbAll('notes')) nbNotes.set(n.id, n);
+    for (const w of await dbAll('weeks')) weeks.set(w.week, w);
     navigator.storage?.persist?.();
   } catch {
     $main.replaceChildren(h('div', { class: 'empty-note' },

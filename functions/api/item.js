@@ -1,7 +1,8 @@
 // GET /api/item?key=...  -> { updated, deleted?, data? }
 // PUT /api/item?key=...  body { updated, deleted?, data? }
-// Keys: e:YYYY-MM-DD (journal entry), s:<id> (notebook section), n:<id> (notebook topic).
-const KEY = /^(e:\d{4}-\d{2}-\d{2}|[sn]:[a-z0-9]{1,40})$/i;
+// Keys: e:YYYY-MM-DD (journal entry), w:YYYY-MM-DD (week, keyed by its Monday),
+//       s:<id> (notebook section), n:<id> (notebook topic).
+const KEY = /^([ew]:\d{4}-\d{2}-\d{2}|[sn]:[a-z0-9]{1,40})$/i;
 const MAX_BYTES = 20 * 1024 * 1024; // KV allows 25 MB per value
 
 const reply = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
