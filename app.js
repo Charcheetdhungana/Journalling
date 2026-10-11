@@ -673,6 +673,321 @@ function monthView(year, month) {
   return [crumbs([{ label: 'Journal', href: '#/' }, { label: String(year), href: `#/${year}` }, { label: name }]), head, table];
 }
 
+/* ---------- Rich text editor with photos (journal days and week plans) ---------- */
+/* Returns the editable body, its formatting toolbar and the wrapper that holds the photo options bar.
+   Call destroy() when the page goes away. onChange fires after every edit. */
+
+function richEditor({ html, label, placeholder, onChange }) {
+  let savedRange = null;
+  let selectedFig = null;
+
+  const body = h('div', {
+    class: 'editor', contenteditable: 'true', role: 'textbox', 'aria-multiline': 'true',
+    'aria-label': label, 'data-placeholder': placeholder,
+  });
+  body.innerHTML = cleanHTML(html) || '<p><br></p>';
+  body.querySelectorAll('figure.photo').forEach(enhanceFigure);
+  document.execCommand('defaultParagraphSeparator', false, 'p');
+
+  const photoBar = buildPhotoBar();
+  photoBar.hidden = true;
+  const wrap = h('div', { class: 'pagewrap' }, body, photoBar);
+
+  /* toolbar */
+  const cmd = (lbl, content, fn) => {
+    const b = h('button', { class: 'tb', type: 'button', 'aria-label': lbl, title: lbl, 'aria-pressed': 'false' });
+    if (typeof content === 'string' && content.startsWith('<')) b.innerHTML = content; else b.textContent = content;
+    b.addEventListener('mousedown', e => e.preventDefault()); // keep text selection
+    b.addEventListener('click', () => { restoreRange(); fn(); body.focus(); onInput(); refreshToolbar(); });
+    return b;
+  };
+  const tbBold = cmd('Bold', 'B', () => document.execCommand('bold'));
+  tbBold.style.fontWeight = '800';
+  const tbItalic = cmd('Italic', 'I', () => document.execCommand('italic'));
+  tbItalic.style.fontStyle = 'italic';
+  const tbHead = cmd('Heading', 'H', () => toggleBlock('h2'));
+  const tbList = cmd('Bulleted list', ICON.list, () => document.execCommand('insertUnorderedList'));
+  const tbQuote = cmd('Quote', ICON.quote, () => toggleBlock('blockquote'));
+  const addPhoto = h('button', { class: 'tb photo-add', type: 'button', onclick: () => { rememberRange(); $filePicker.click(); } },
+    h('span', { html: ICON.photo }), 'Add photo');
+  addPhoto.addEventListener('mousedown', e => e.preventDefault());
+  const toolbar = h('div', { class: 'toolbar', role: 'toolbar', 'aria-label': 'Formatting' },
+    tbBold, tbItalic, h('span', { class: 'sep', 'aria-hidden': 'true' }), tbHead, tbList, tbQuote, addPhoto);
+
+  /* behaviours */
+  function toggleBlock(tag) {
+    const cur = (document.queryCommandValue('formatBlock') || '').toLowerCase().replace(/[<>]/g, '');
+    document.execCommand('formatBlock', false, cur === tag ? 'p' : tag);
+  }
+
+  function refreshToolbar() {
+    const sel = document.getSelection();
+    if (!sel.anchorNode || !body.contains(sel.anchorNode)) return;
+    const blk = (document.queryCommandValue('formatBlock') || '').toLowerCase().replace(/[<>]/g, '');
+    const set = (b, on) => b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    set(tbBold, document.queryCommandState('bold'));
+    set(tbItalic, document.queryCommandState('italic'));
+    set(tbHead, blk === 'h2');
+    set(tbQuote, blk === 'blockquote');
+    set(tbList, document.queryCommandState('insertUnorderedList'));
+  }
+
+  function rememberRange() {
+    const sel = document.getSelection();
+    if (sel.rangeCount && body.contains(sel.anchorNode)) savedRange = sel.getRangeAt(0).cloneRange();
+  }
+  function restoreRange() {
+    if (!savedRange) return;
+    const sel = document.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+  }
+
+  const onSelectionChange = () => { rememberRange(); refreshToolbar(); };
+  document.addEventListener('selectionchange', onSelectionChange);
+
+  function blockOf(node) {
+    while (node && node.parentNode !== body) node = node.parentNode;
+    return node && node !== body ? node : null;
+  }
+
+  function ensureParagraph() {
+    if (!body.firstElementChild) body.innerHTML = '<p><br></p>';
+  }
+
+  function updateEmptyState() {
+    const hasText = body.textContent.trim().length > 0;
+    const hasFig = !!body.querySelector('figure.photo');
+    body.classList.toggle('is-empty', !hasText && !hasFig && body.children.length <= 1);
+  }
+
+  function enhanceFigure(fig) {
+    fig.classList.add('photo');
+    fig.setAttribute('contenteditable', 'false');
+    fig.setAttribute('tabindex', '0');
+    fig.setAttribute('role', 'group');
+    fig.setAttribute('aria-label', 'Photo. Press Delete to remove.');
+    let cap = fig.querySelector('figcaption');
+    if (!cap) { cap = document.createElement('figcaption'); fig.append(cap); }
+    cap.setAttribute('contenteditable', 'true');
+    cap.setAttribute('data-placeholder', 'Add a caption');
+    cap.setAttribute('role', 'textbox');
+    cap.setAttribute('aria-label', 'Photo caption');
+    if (!fig.dataset.size) fig.dataset.size = 'wide';
+  }
+
+  function makeFigure(src) {
+    const fig = document.createElement('figure');
+    fig.dataset.size = 'wide';
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = '';
+    fig.append(img);
+    enhanceFigure(fig);
+    return fig;
+  }
+
+  async function addPhotos(files, range) {
+    const images = [...files].filter(f => f.type.startsWith('image/'));
+    if (!images.length) { toast('That file is not an image. Choose a JPG, PNG, WebP or GIF.'); return; }
+    let anchor = null;
+    if (range && body.contains(range.startContainer)) anchor = blockOf(range.startContainer);
+    let last = null;
+    for (const file of images) {
+      try {
+        const src = await compressImage(file);
+        const fig = makeFigure(src);
+        if (last) last.after(fig);
+        else if (anchor) {
+          const isEmptyLine = anchor.tagName === 'P' && !anchor.textContent.trim() && !anchor.querySelector('img');
+          anchor.after(fig);
+          if (isEmptyLine && anchor.nextElementSibling === fig) anchor.remove();
+        } else body.append(fig);
+        last = fig;
+      } catch {
+        toast(`Couldn't read ${file.name}. Try a JPG or PNG.`);
+      }
+    }
+    if (!last) return;
+    if (!last.nextElementSibling || last.nextElementSibling.matches('figure')) {
+      const p = document.createElement('p');
+      p.innerHTML = '<br>';
+      last.after(p);
+    }
+    const r = document.createRange();
+    r.setStart(last.nextElementSibling, 0);
+    r.collapse(true);
+    savedRange = r;
+    selectFigure(last);
+    last.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    onInput();
+  }
+
+  /* photo bar */
+  function buildPhotoBar() {
+    const bar = h('div', { class: 'photobar', role: 'toolbar', 'aria-label': 'Photo options' });
+    const btn = (lbl, text, fn, cls) => {
+      const b = h('button', { type: 'button', class: cls || '', 'aria-label': lbl, title: lbl, 'data-size': fn.size || false }, text);
+      b.addEventListener('mousedown', e => e.preventDefault());
+      b.addEventListener('click', () => { fn(); positionBar(); });
+      return b;
+    };
+    const size = s => { const f = () => { if (selectedFig) { selectedFig.dataset.size = s; onInput(); syncSizeButtons(); } }; f.size = s; return f; };
+    bar.append(
+      btn('Small photo', 'Small', size('small')),
+      btn('Wide photo', 'Wide', size('wide')),
+      btn('Full-width photo', 'Full', size('full')),
+      btn('Move photo up', h('span', { html: ICON.up }), () => moveFig(-1)),
+      btn('Move photo down', h('span', { html: ICON.down }), () => moveFig(1)),
+      btn('Remove photo', h('span', { html: ICON.trash }), removeFig, 'rm'));
+    return bar;
+  }
+
+  function syncSizeButtons() {
+    photoBar.querySelectorAll('[data-size]').forEach(b => b.setAttribute('aria-pressed', String(selectedFig?.dataset.size === b.dataset.size)));
+  }
+
+  function selectFigure(fig) {
+    if (selectedFig === fig) { positionBar(); return; }
+    selectedFig?.classList.remove('selected');
+    selectedFig = fig;
+    if (!fig) { photoBar.hidden = true; return; }
+    fig.classList.add('selected');
+    photoBar.hidden = false;
+    syncSizeButtons();
+    positionBar();
+  }
+
+  function positionBar() {
+    if (!selectedFig) return;
+    const wr = wrap.getBoundingClientRect();
+    const fr = selectedFig.getBoundingClientRect();
+    const bw = photoBar.offsetWidth;
+    let left = fr.left - wr.left + 8;
+    left = Math.max(0, Math.min(left, wr.width - bw));
+    photoBar.style.left = left + 'px';
+    photoBar.style.top = Math.max(8, fr.top - wr.top + 8) + 'px';
+  }
+
+  function moveFig(dir) {
+    const f = selectedFig;
+    if (!f) return;
+    const sib = dir < 0 ? f.previousElementSibling : f.nextElementSibling;
+    if (!sib) return;
+    if (dir < 0) sib.before(f); else sib.after(f);
+    onInput();
+    f.focus({ preventScroll: true });
+    f.scrollIntoView({ block: 'nearest' });
+  }
+
+  function removeFig() {
+    const f = selectedFig;
+    if (!f) return;
+    const next = f.nextElementSibling || f.previousElementSibling;
+    selectFigure(null);
+    f.remove();
+    ensureParagraph();
+    onInput();
+    toast('Photo removed');
+    (next || body).focus?.();
+  }
+
+  function serialize() {
+    const clone = body.cloneNode(true);
+    clone.querySelectorAll('figure.photo').forEach(f => {
+      f.classList.remove('selected');
+      f.removeAttribute('contenteditable');
+      f.removeAttribute('tabindex');
+      f.removeAttribute('role');
+      f.removeAttribute('aria-label');
+      const cap = f.querySelector('figcaption');
+      const img = f.querySelector('img');
+      if (img) img.alt = cap ? cap.textContent.trim() : '';
+      if (cap && !cap.textContent.trim()) cap.remove();
+    });
+    clone.querySelectorAll('figcaption').forEach(c => { c.removeAttribute('contenteditable'); c.removeAttribute('data-placeholder'); c.removeAttribute('role'); c.removeAttribute('aria-label'); });
+    return clone.innerHTML;
+  }
+
+  function onInput() {
+    updateEmptyState();
+    if (selectedFig) positionBar();
+    onChange();
+  }
+
+  /* events */
+  body.addEventListener('input', onInput);
+
+  body.addEventListener('keydown', e => {
+    const fig = e.target.closest?.('figure.photo');
+    if (fig && e.target === fig && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      selectFigure(fig);
+      removeFig();
+    }
+  });
+
+  const onPointer = e => {
+    const fig = e.target.closest?.('figure.photo');
+    if (fig && body.contains(fig)) selectFigure(fig);
+    else if (!photoBar.contains(e.target)) selectFigure(null);
+  };
+  document.addEventListener('pointerdown', onPointer);
+  body.addEventListener('focusin', e => {
+    const fig = e.target.closest?.('figure.photo');
+    if (fig) selectFigure(fig);
+  });
+  window.addEventListener('resize', positionBar);
+
+  body.addEventListener('paste', e => {
+    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+    if (files.length) { e.preventDefault(); rememberRange(); addPhotos(files, savedRange); return; }
+    // paste text only, so outside styles don't leak in
+    e.preventDefault();
+    document.execCommand('insertText', false, e.clipboardData.getData('text/plain'));
+  });
+
+  body.addEventListener('dragover', e => {
+    if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); body.classList.add('dragover'); }
+  });
+  body.addEventListener('dragleave', () => body.classList.remove('dragover'));
+  body.addEventListener('drop', e => {
+    body.classList.remove('dragover');
+    const files = e.dataTransfer?.files;
+    if (!files || !files.length) return;
+    e.preventDefault();
+    let range = null;
+    if (document.caretRangeFromPoint) range = document.caretRangeFromPoint(e.clientX, e.clientY);
+    else if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(e.clientX, e.clientY);
+      if (pos) { range = document.createRange(); range.setStart(pos.offsetNode, pos.offset); }
+    }
+    addPhotos(files, range || savedRange);
+  });
+
+  $filePicker.onchange = () => {
+    const files = $filePicker.files;
+    if (files && files.length) addPhotos(files, savedRange);
+    $filePicker.value = '';
+  };
+
+  updateEmptyState();
+
+  return {
+    body, toolbar, wrap, serialize,
+    stats() {
+      const plain = body.innerText.trim();
+      return { words: plain ? plain.split(/\s+/).length : 0, photos: body.querySelectorAll('figure.photo').length, hasText: body.textContent.trim().length > 0 };
+    },
+    destroy() {
+      document.removeEventListener('selectionchange', onSelectionChange);
+      document.removeEventListener('pointerdown', onPointer);
+      window.removeEventListener('resize', positionBar);
+      $filePicker.onchange = null;
+    },
+  };
+}
+
 /* ---------- Day view (editor) ---------- */
 
 async function dayView(year, month, day, token) {
@@ -686,10 +1001,8 @@ async function dayView(year, month, day, token) {
   const dayLink = p => `#/${p.y}/${p.m}/${p.d}`;
 
   let mood = stored?.mood || 0;
-  let savedRange = null;
   let dirty = false;
   let saveTimer;
-  let selectedFig = null;
 
   /* header */
   const status = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' }, stored ? 'Saved' : '');
@@ -868,40 +1181,17 @@ async function dayView(year, month, day, token) {
   (initialTrades.length ? initialTrades : [{}]).forEach(t => addRow(t, false));
 
   /* editor */
-  const body = h('div', {
-    class: 'editor', contenteditable: 'true', role: 'textbox', 'aria-multiline': 'true',
-    'aria-label': 'Journal entry', 'data-placeholder': 'Write about your day. Press the Add photo button to put a picture below the line you are on.',
+  const wordCount = h('span', { id: 'wordCount' });
+  const ed = richEditor({
+    html: stored?.html,
+    label: 'Journal entry',
+    placeholder: 'Write about your day. Press the Add photo button to put a picture below the line you are on.',
+    onChange: () => onInput(),
   });
-  body.innerHTML = cleanHTML(stored?.html) || '<p><br></p>';
-  body.querySelectorAll('figure.photo').forEach(enhanceFigure);
-  document.execCommand('defaultParagraphSeparator', false, 'p');
-
-  const photoBar = buildPhotoBar();
-  photoBar.hidden = true;
-
-  /* toolbar */
-  const cmd = (label, content, fn, extra) => {
-    const b = h('button', { class: 'tb', type: 'button', 'aria-label': label, title: label, 'aria-pressed': 'false', ...extra });
-    if (typeof content === 'string' && content.startsWith('<')) b.innerHTML = content; else b.textContent = content;
-    b.addEventListener('mousedown', e => e.preventDefault()); // keep text selection
-    b.addEventListener('click', () => { restoreRange(); fn(); body.focus(); onInput(); refreshToolbar(); });
-    return b;
-  };
-  const tbBold = cmd('Bold', 'B', () => document.execCommand('bold'));
-  tbBold.style.fontWeight = '800';
-  const tbItalic = cmd('Italic', 'I', () => document.execCommand('italic'));
-  tbItalic.style.fontStyle = 'italic';
-  const tbHead = cmd('Heading', 'H', () => toggleBlock('h2'));
-  const tbList = cmd('Bulleted list', ICON.list, () => document.execCommand('insertUnorderedList'));
-  const tbQuote = cmd('Quote', ICON.quote, () => toggleBlock('blockquote'));
-  const addPhoto = h('button', { class: 'tb photo-add', type: 'button', onclick: () => { rememberRange(); $filePicker.click(); } },
-    h('span', { html: ICON.photo }), 'Add photo');
-  addPhoto.addEventListener('mousedown', e => e.preventDefault());
-  const toolbar = h('div', { class: 'toolbar', role: 'toolbar', 'aria-label': 'Formatting' },
-    tbBold, tbItalic, h('span', { class: 'sep', 'aria-hidden': 'true' }), tbHead, tbList, tbQuote, addPhoto);
+  const { body, toolbar, wrap: wrapEl } = ed;
 
   const foot = h('div', { class: 'day-foot' },
-    h('span', { id: 'wordCount' }),
+    wordCount,
     stored ? h('button', { class: 'btn btn-danger', type: 'button', onclick: deleteEntry }, 'Delete this entry') : null);
 
   const memories = onThisDay(month, day, year);
@@ -911,210 +1201,7 @@ async function dayView(year, month, day, token) {
       h('div', { class: 'memory-list' }, memories.map(memoryLink)))
     : null;
 
-  const wrapEl = h('div', { class: 'pagewrap' }, body, photoBar);
-
-  /* ---- behaviours ---- */
-
-  function toggleBlock(tag) {
-    const cur = (document.queryCommandValue('formatBlock') || '').toLowerCase().replace(/[<>]/g, '');
-    document.execCommand('formatBlock', false, cur === tag ? 'p' : tag);
-  }
-
-  function refreshToolbar() {
-    const sel = document.getSelection();
-    if (!sel.anchorNode || !body.contains(sel.anchorNode)) return;
-    const blk = (document.queryCommandValue('formatBlock') || '').toLowerCase().replace(/[<>]/g, '');
-    const set = (b, on) => b.setAttribute('aria-pressed', on ? 'true' : 'false');
-    set(tbBold, document.queryCommandState('bold'));
-    set(tbItalic, document.queryCommandState('italic'));
-    set(tbHead, blk === 'h2');
-    set(tbQuote, blk === 'blockquote');
-    set(tbList, document.queryCommandState('insertUnorderedList'));
-  }
-
-  function rememberRange() {
-    const sel = document.getSelection();
-    if (sel.rangeCount && body.contains(sel.anchorNode)) savedRange = sel.getRangeAt(0).cloneRange();
-  }
-  function restoreRange() {
-    if (!savedRange) return;
-    const sel = document.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(savedRange);
-  }
-
-  const onSelectionChange = () => { rememberRange(); refreshToolbar(); };
-  document.addEventListener('selectionchange', onSelectionChange);
-
-  function blockOf(node) {
-    while (node && node.parentNode !== body) node = node.parentNode;
-    return node && node !== body ? node : null;
-  }
-
-  function ensureParagraph() {
-    if (!body.firstElementChild) body.innerHTML = '<p><br></p>';
-  }
-
-  function updateEmptyState() {
-    const hasText = body.textContent.trim().length > 0;
-    const hasFig = !!body.querySelector('figure.photo');
-    body.classList.toggle('is-empty', !hasText && !hasFig && body.children.length <= 1);
-    const plain = body.innerText.trim();
-    const words = plain ? plain.split(/\s+/).length : 0;
-    const photos = body.querySelectorAll('figure.photo').length;
-    const wc = document.getElementById('wordCount');
-    if (wc) wc.textContent = plural(words, 'word', 'words') + (photos ? ` · ${plural(photos, 'photo', 'photos')}` : '');
-  }
-
-  function enhanceFigure(fig) {
-    fig.classList.add('photo');
-    fig.setAttribute('contenteditable', 'false');
-    fig.setAttribute('tabindex', '0');
-    fig.setAttribute('role', 'group');
-    fig.setAttribute('aria-label', 'Photo. Press Delete to remove.');
-    let cap = fig.querySelector('figcaption');
-    if (!cap) { cap = document.createElement('figcaption'); fig.append(cap); }
-    cap.setAttribute('contenteditable', 'true');
-    cap.setAttribute('data-placeholder', 'Add a caption');
-    cap.setAttribute('role', 'textbox');
-    cap.setAttribute('aria-label', 'Photo caption');
-    if (!fig.dataset.size) fig.dataset.size = 'wide';
-  }
-
-  function makeFigure(src) {
-    const fig = document.createElement('figure');
-    fig.dataset.size = 'wide';
-    const img = document.createElement('img');
-    img.src = src;
-    img.alt = '';
-    fig.append(img);
-    enhanceFigure(fig);
-    return fig;
-  }
-
-  async function addPhotos(files, range) {
-    const images = [...files].filter(f => f.type.startsWith('image/'));
-    if (!images.length) { toast('That file is not an image. Choose a JPG, PNG, WebP or GIF.'); return; }
-    let anchor = null;
-    if (range && body.contains(range.startContainer)) anchor = blockOf(range.startContainer);
-    let last = null;
-    for (const file of images) {
-      try {
-        const src = await compressImage(file);
-        const fig = makeFigure(src);
-        if (last) last.after(fig);
-        else if (anchor) {
-          const isEmptyLine = anchor.tagName === 'P' && !anchor.textContent.trim() && !anchor.querySelector('img');
-          anchor.after(fig);
-          if (isEmptyLine && anchor.nextElementSibling === fig) anchor.remove();
-        } else body.append(fig);
-        last = fig;
-      } catch {
-        toast(`Couldn't read ${file.name}. Try a JPG or PNG.`);
-      }
-    }
-    if (!last) return;
-    if (!last.nextElementSibling || last.nextElementSibling.matches('figure')) {
-      const p = document.createElement('p');
-      p.innerHTML = '<br>';
-      last.after(p);
-    }
-    const r = document.createRange();
-    r.setStart(last.nextElementSibling, 0);
-    r.collapse(true);
-    savedRange = r;
-    selectFigure(last);
-    last.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    onInput();
-  }
-
-  /* photo bar */
-  function buildPhotoBar() {
-    const bar = h('div', { class: 'photobar', role: 'toolbar', 'aria-label': 'Photo options' });
-    const btn = (label, text, fn, cls) => {
-      const b = h('button', { type: 'button', class: cls || '', 'aria-label': label, title: label, 'data-size': fn.size || false }, text);
-      b.addEventListener('mousedown', e => e.preventDefault());
-      b.addEventListener('click', () => { fn(); positionBar(); });
-      return b;
-    };
-    const size = s => { const f = () => { if (selectedFig) { selectedFig.dataset.size = s; onInput(); syncSizeButtons(); } }; f.size = s; return f; };
-    bar.append(
-      btn('Small photo', 'Small', size('small')),
-      btn('Wide photo', 'Wide', size('wide')),
-      btn('Full-width photo', 'Full', size('full')),
-      btn('Move photo up', h('span', { html: ICON.up }), () => moveFig(-1)),
-      btn('Move photo down', h('span', { html: ICON.down }), () => moveFig(1)),
-      btn('Remove photo', h('span', { html: ICON.trash }), removeFig, 'rm'));
-    return bar;
-  }
-
-  function syncSizeButtons() {
-    photoBar.querySelectorAll('[data-size]').forEach(b => b.setAttribute('aria-pressed', String(selectedFig?.dataset.size === b.dataset.size)));
-  }
-
-  function selectFigure(fig) {
-    if (selectedFig === fig) { positionBar(); return; }
-    selectedFig?.classList.remove('selected');
-    selectedFig = fig;
-    if (!fig) { photoBar.hidden = true; return; }
-    fig.classList.add('selected');
-    photoBar.hidden = false;
-    syncSizeButtons();
-    positionBar();
-  }
-
-  function positionBar() {
-    if (!selectedFig) return;
-    const wr = wrapEl.getBoundingClientRect();
-    const fr = selectedFig.getBoundingClientRect();
-    const bw = photoBar.offsetWidth;
-    let left = fr.left - wr.left + 8;
-    left = Math.max(0, Math.min(left, wr.width - bw));
-    photoBar.style.left = left + 'px';
-    photoBar.style.top = Math.max(8, fr.top - wr.top + 8) + 'px';
-  }
-
-  function moveFig(dir) {
-    const f = selectedFig;
-    if (!f) return;
-    const sib = dir < 0 ? f.previousElementSibling : f.nextElementSibling;
-    if (!sib) return;
-    if (dir < 0) sib.before(f); else sib.after(f);
-    onInput();
-    f.focus({ preventScroll: true });
-    f.scrollIntoView({ block: 'nearest' });
-  }
-
-  function removeFig() {
-    const f = selectedFig;
-    if (!f) return;
-    const next = f.nextElementSibling || f.previousElementSibling;
-    selectFigure(null);
-    f.remove();
-    ensureParagraph();
-    onInput();
-    toast('Photo removed');
-    (next || body).focus?.();
-  }
-
   /* saving */
-  function serialize() {
-    const clone = body.cloneNode(true);
-    clone.querySelectorAll('figure.photo').forEach(f => {
-      f.classList.remove('selected');
-      f.removeAttribute('contenteditable');
-      f.removeAttribute('tabindex');
-      f.removeAttribute('role');
-      f.removeAttribute('aria-label');
-      const cap = f.querySelector('figcaption');
-      const img = f.querySelector('img');
-      if (img) img.alt = cap ? cap.textContent.trim() : '';
-      if (cap && !cap.textContent.trim()) cap.remove();
-    });
-    clone.querySelectorAll('figcaption').forEach(c => { c.removeAttribute('contenteditable'); c.removeAttribute('data-placeholder'); c.removeAttribute('role'); c.removeAttribute('aria-label'); });
-    return clone.innerHTML;
-  }
-
   function queueSave() {
     dirty = true;
     status.textContent = 'Saving…';
@@ -1126,7 +1213,7 @@ async function dayView(year, month, day, token) {
     clearTimeout(saveTimer);
     if (!dirty) return;
     dirty = false;
-    const html = serialize();
+    const html = ed.serialize();
     const entry = { date, title: titleInput.value.trim(), mood, html, trades: readTrades(), updated: Date.now() };
     const hasContent = entry.title || mood || entry.trades.length || /<img/.test(html) || (body.textContent || '').trim();
     try {
@@ -1149,10 +1236,14 @@ async function dayView(year, month, day, token) {
     }
   }
 
+  function updateCount() {
+    const { words, photos } = ed.stats();
+    wordCount.textContent = plural(words, 'word', 'words') + (photos ? ` · ${plural(photos, 'photo', 'photos')}` : '');
+  }
+
   function onInput() {
-    updateEmptyState();
+    updateCount();
     queueSave();
-    if (selectedFig) positionBar();
   }
 
   async function deleteEntry() {
@@ -1170,62 +1261,6 @@ async function dayView(year, month, day, token) {
   titleInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); body.focus(); }
   });
-  body.addEventListener('input', onInput);
-
-  body.addEventListener('keydown', e => {
-    const fig = e.target.closest?.('figure.photo');
-    if (fig && e.target === fig && (e.key === 'Delete' || e.key === 'Backspace')) {
-      e.preventDefault();
-      selectFigure(fig);
-      removeFig();
-    }
-  });
-
-  const onPointer = e => {
-    const fig = e.target.closest?.('figure.photo');
-    if (fig && body.contains(fig)) selectFigure(fig);
-    else if (!photoBar.contains(e.target)) selectFigure(null);
-  };
-  document.addEventListener('pointerdown', onPointer);
-  body.addEventListener('focusin', e => {
-    const fig = e.target.closest?.('figure.photo');
-    if (fig) selectFigure(fig);
-  });
-  window.addEventListener('resize', positionBar);
-
-  body.addEventListener('paste', e => {
-    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
-    if (files.length) { e.preventDefault(); rememberRange(); addPhotos(files, savedRange); return; }
-    // paste text only, so outside styles don't leak in
-    e.preventDefault();
-    document.execCommand('insertText', false, e.clipboardData.getData('text/plain'));
-  });
-
-  body.addEventListener('dragover', e => {
-    if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); body.classList.add('dragover'); }
-  });
-  body.addEventListener('dragleave', () => body.classList.remove('dragover'));
-  body.addEventListener('drop', e => {
-    body.classList.remove('dragover');
-    const files = e.dataTransfer?.files;
-    if (!files || !files.length) return;
-    e.preventDefault();
-    let range = null;
-    if (document.caretRangeFromPoint) range = document.caretRangeFromPoint(e.clientX, e.clientY);
-    else if (document.caretPositionFromPoint) {
-      const pos = document.caretPositionFromPoint(e.clientX, e.clientY);
-      if (pos) { range = document.createRange(); range.setStart(pos.offsetNode, pos.offset); }
-    }
-    addPhotos(files, range || savedRange);
-  });
-
-  const onPick = () => {
-    const files = $filePicker.files;
-    if (files && files.length) addPhotos(files, savedRange);
-    $filePicker.value = '';
-  };
-  $filePicker.onchange = onPick;
-
   const onUnload = () => { if (dirty) persist(); };
   const onVisibility = () => { if (document.hidden && dirty) persist(); };
   window.addEventListener('pagehide', onUnload);
@@ -1234,17 +1269,14 @@ async function dayView(year, month, day, token) {
   activeEditor = {
     async flush() {
       document.removeEventListener('visibilitychange', onVisibility);
-      document.removeEventListener('selectionchange', onSelectionChange);
-      document.removeEventListener('pointerdown', onPointer);
-      window.removeEventListener('resize', positionBar);
+      ed.destroy();
       window.removeEventListener('resize', fitTitle);
       window.removeEventListener('pagehide', onUnload);
-      $filePicker.onchange = null;
       await persist();
     },
   };
 
-  updateEmptyState();
+  updateCount();
 
   requestAnimationFrame(fitTitle);
   window.addEventListener('resize', fitTitle);
@@ -1637,7 +1669,8 @@ function notebookView(sid, nid) {
 }
 
 /* ---------- Weeks: recap and watch list ---------- */
-/* One record per week, keyed by that week's Monday: { week, recap, watch: [{ id, symbol, note, done }], updated }.
+/* One record per week, keyed by that week's Monday: { week, plan, recap, watch: [{ id, symbol, note, done }], updated }.
+   plan is the week's preparation (HTML, with photos); recap is the note written after the week.
    The recap's trade counts and profit or loss are never stored. They are worked out from the
    journal entries every time the page opens, so they can't drift from what you wrote. */
 
@@ -1686,8 +1719,10 @@ function cleanWatch(list) {
   }).filter(Boolean);
 }
 
-const cleanWeek = (raw, week, updated) => ({ week, recap: String(raw.recap || '').slice(0, 20000), watch: cleanWatch(raw.watch), updated });
-const weekRecord = key => weeks.get(key) || { week: key, recap: '', watch: [], updated: 0 };
+const cleanWeek = (raw, week, updated) => ({
+  week, plan: cleanHTML(raw.plan), recap: String(raw.recap || '').slice(0, 20000), watch: cleanWatch(raw.watch), updated,
+});
+const weekRecord = key => weeks.get(key) || { week: key, plan: '', recap: '', watch: [], updated: 0 };
 
 function saveWeek(rec) {
   rec.updated = Date.now();
@@ -1703,12 +1738,15 @@ function weekHead(kind, key, extra) {
   const prev = addDays(key, -7);
   const next = addDays(key, 7);
   const now = key === thisWeek();
+  const pick = h('input', { type: 'date', class: 'week-pick', value: key, 'aria-label': 'Go to the week containing this date' });
+  pick.addEventListener('change', () => { if (pick.value) location.hash = `${root}/${pick.value}`; });
   return h('div', { class: 'page-head' },
     h('div', null,
       h('h1', null, kind === 'recap' ? 'Weekly recap' : 'Weekly watch list'),
       h('p', { class: 'page-sub' }, weekLabel(key), now ? ' · This week' : '', extra || null)),
     h('div', { class: 'stepper' },
       stepBtn(`${root}/${prev}`, `Previous week, ${weekLabel(prev)}`, ICON.left),
+      pick,
       now ? null : h('a', { class: 'btn btn-sm', href: root }, 'This week'),
       stepBtn(`${root}/${next}`, `Next week, ${weekLabel(next)}`, ICON.right)));
 }
@@ -1847,24 +1885,60 @@ async function recapView(key, token) {
   return { nodes: nodes.filter(Boolean), title: `Recap ${weekLabel(key)}`, mount() { $main.focus({ preventScroll: true }); } };
 }
 
-/* ---------- Weekly watch list ---------- */
+/* ---------- Weekly watch list: the week's preparation ---------- */
+/* A written plan for the week (text, headings, lists, photos) with the week's tickers beside it. */
+
+function weekRibbon(key) {
+  const now = todayParts();
+  return h('nav', { class: 'week-ribbon', 'aria-label': 'Days of this week' },
+    Array.from({ length: 7 }, (_, i) => {
+      const dk = addDays(key, i);
+      const p = partsOf(dk);
+      const mt = meta.get(dk);
+      const isToday = p.y === now.y && p.m === now.m && p.d === now.d;
+      const note = mt && mt.taken ? plural(mt.taken, 'trade', 'trades') : mt ? 'Entry' : '';
+      const spoken = `${WEEKDAYS[i]} ${p.d} ${MONTHS[p.m - 1]}${mt ? `, ${mt.title || 'entry written'}${mt.taken ? ', ' + plural(mt.taken, 'trade', 'trades') : ''}` : ', no entry yet'}`;
+      return h('a', {
+        class: ['day-chip', mt ? 'has' : '', isToday ? 'today' : ''].join(' ').trim(),
+        href: `#/${p.y}/${p.m}/${p.d}`, 'aria-label': spoken, 'aria-current': isToday ? 'date' : false,
+      },
+        h('span', { class: 'day-chip-dow' }, WEEKDAYS[i].slice(0, 3) + (i === 0 || p.d === 1 ? ' ' + MONTHS[p.m - 1].slice(0, 3) : '')),
+        h('span', { class: 'day-chip-num' }, String(p.d)),
+        h('span', { class: 'day-chip-note' }, note));
+    }));
+}
 
 function watchView(key) {
   const rec = weekRecord(key);
   const list = rec.watch.map(x => ({ ...x }));
-  const status = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' }, list.length ? 'Saved' : '');
+  const status = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' }, rec.plan || list.length ? 'Saved' : '');
+  const words = h('span');
+
   const saver = autosaver(async () => {
+    rec.plan = ed.stats().hasText || ed.stats().photos ? ed.serialize() : '';
     rec.watch = cleanWatch(list);
     await saveWeek(rec);
   }, status);
+
+  const ed = richEditor({
+    html: rec.plan,
+    label: 'Plan for the week',
+    placeholder: 'Write your plan for the week: what you expect, the levels that matter, what you will trade and what you will leave alone. Use Add photo to drop in chart screenshots.',
+    onChange: () => { countWords(); saver.touch(); },
+  });
+  function countWords() {
+    const s = ed.stats();
+    words.textContent = plural(s.words, 'word', 'words') + (s.photos ? ` · ${plural(s.photos, 'photo', 'photos')}` : '');
+  }
   const changed = () => { updateSummary(); saver.touch(); };
   const unhook = hookPageHide(saver);
-  activeEditor = { async flush() { unhook(); await saver.run(); } };
+  activeEditor = { async flush() { unhook(); ed.destroy(); await saver.run(); } };
 
+  /* tickers */
   const summary = h('p', { class: 'watch-summary' });
   const ul = h('ul', { class: 'watch-list' });
-  const empty = h('p', { class: 'recap-empty' }, 'Nothing on this week’s list yet. Add the symbols you want to watch, with the level or the reason.');
-  const carry = h('button', { class: 'btn btn-sm', type: 'button' }, 'Carry over from last week');
+  const empty = h('p', { class: 'recap-empty' }, 'No tickers yet. Add the symbols you want to watch, with the level or the reason.');
+  const carry = h('button', { class: 'btn btn-sm', type: 'button' });
 
   const carryCandidates = () => {
     const have = new Set(list.map(x => x.symbol).filter(Boolean));
@@ -1945,12 +2019,20 @@ function watchView(key) {
   });
 
   renderList();
+  countWords();
+
   const nodes = [
     weekHead('watch', key),
-    addForm,
-    h('div', { class: 'watch-bar' }, summary, h('span', { class: 'nb-spacer' }), carry, status),
-    ul,
-    empty,
+    weekRibbon(key),
+    h('div', { class: 'prep' },
+      h('section', { class: 'prep-main', 'aria-label': 'Plan for the week' },
+        ed.toolbar, ed.wrap,
+        h('div', { class: 'day-foot' }, words, status)),
+      h('aside', { class: 'prep-side', 'aria-label': 'Tickers to watch' },
+        h('h2', { class: 'section-head' }, 'Tickers to watch'),
+        addForm,
+        h('div', { class: 'watch-bar' }, summary, h('span', { class: 'nb-spacer' }), carry),
+        ul, empty)),
     h('div', { class: 'recap-links' },
       h('a', { class: 'btn', href: `#/recap/${key}` }, 'See this week’s recap')),
   ];

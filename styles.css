@@ -647,3 +647,51 @@ main.wide { max-width: 1320px; }
 @media (max-width: 1100px) { .sync { font-size: 0; } }
 
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* ---------- Week preparation ---------- */
+.week-pick {
+  min-height: 44px; padding: 0 var(--s3); border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--ink); font: inherit; font-variant-numeric: tabular-nums;
+}
+.stepper { flex-wrap: wrap; }
+
+/* the seven days of the week, each one a link to that day's entry */
+.week-ribbon { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: var(--s2); margin-bottom: var(--s6); }
+.day-chip {
+  display: grid; gap: 2px; align-content: start; min-height: 84px; padding: var(--s3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); text-decoration: none;
+  transition: border-color .15s;
+}
+.day-chip:hover { border-color: var(--accent); }
+.day-chip.has { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+.day-chip.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.day-chip-dow { color: var(--muted); font-size: var(--fs-sm); font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.day-chip-num { font: 600 1.5rem/1.2 var(--serif); font-variant-numeric: tabular-nums; }
+.day-chip-note { color: var(--muted); font-size: var(--fs-xs); min-height: 1.2em; }
+
+.prep { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: var(--s7); align-items: start; }
+.prep-main { min-width: 0; max-width: 780px; }
+.prep-main .toolbar { position: sticky; top: var(--s2); z-index: 2; }
+.prep-main .editor { min-height: 52vh; padding: 0 0 var(--s6) var(--s5); }
+.prep-main .save-state { min-width: 0; }
+.prep-side { position: sticky; top: var(--s4); min-width: 0; }
+.prep-side .section-head { margin-top: 0; }
+.prep-side .watch-add { grid-template-columns: minmax(0, 1fr) auto; }
+.prep-side .watch-add .watch-note { grid-column: 1 / -1; order: 3; }
+.prep-side .watch-item { grid-template-columns: 28px minmax(0, 1fr) auto; }
+.prep-side .watch-item .watch-note { grid-column: 2 / 4; grid-row: 2; }
+.prep-side .watch-bar { flex-wrap: wrap; }
+@media (max-width: 1000px) {
+  .prep { grid-template-columns: 1fr; gap: var(--s6); }
+  .prep-side { position: static; }
+  .prep-main .editor { padding-left: var(--s4); }
+}
+@media (max-width: 720px) {
+  .week-ribbon { gap: var(--s1); }
+  .day-chip { padding: var(--s2); min-height: 72px; }
+  .day-chip-num { font-size: 1.25rem; }
+  .day-chip-note { display: none; }
+}
+
+/* notebook: the "New section" button used to spill into the next column */
+.nb-pane-head { flex-wrap: wrap; }
