@@ -38,8 +38,16 @@ async function verify(token, env) {
 }
 
 export async function onRequest({ request, env, next }) {
-  if (!env.DAYBOOK) return json({ error: 'KV binding DAYBOOK is missing' }, 503);
-  if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return json({ error: 'Cloudflare Access is not configured' }, 503);
+  const url = new URL(request.url);
+  // price lookups hold no personal data, so they work without the storage binding (sync can come later)
+  const quotes = url.pathname === '/api/quotes';
+  if (!quotes && !env.DAYBOOK) return json({ error: 'KV binding DAYBOOK is missing' }, 503);
+  if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) {
+    // Without the Access settings the token can't be checked. Quotes are then served only on your own domain,
+    // which sits behind Cloudflare Access at the edge, and never on the open *.pages.dev address.
+    if (quotes && !url.hostname.endsWith('.pages.dev')) return next();
+    return json({ error: 'Cloudflare Access is not configured' }, 503);
+  }
   const token = request.headers.get('Cf-Access-Jwt-Assertion');
   if (!token) return json({ error: 'Sign-in required' }, 401);
   let claims;

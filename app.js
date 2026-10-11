@@ -1979,6 +1979,16 @@ function watchView(key) {
         });
         sym.value = it.symbol;
         sym.addEventListener('input', () => { sym.value = sym.value.toUpperCase(); it.symbol = cleanSymbol(sym.value); changed(); });
+        sym.addEventListener('paste', e => { // "PENG HPE NTAP DELL" pasted into one box fills four rows
+          const parts = (e.clipboardData?.getData('text') || '').toUpperCase().split(/[\s,;]+/).map(cleanSymbol).filter(Boolean);
+          if (parts.length < 2) return;
+          e.preventDefault();
+          it.symbol = parts[0];
+          const room = MAX_LEADERS - g.items.length;
+          parts.slice(1, 1 + Math.max(0, room)).forEach(p => g.items.push({ symbol: p, change: null }));
+          renderRows();
+          changed();
+        });
         const chg = h('input', {
           class: 'rs-change', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '%', 'aria-label': 'Change in percent',
         });
@@ -2013,7 +2023,7 @@ function watchView(key) {
     name.addEventListener('input', () => { g.name = name.value; card.setAttribute('aria-label', g.name || 'Group'); changed(); });
 
     const lead = h('button', {
-      class: 'rs-lead', type: 'button', 'aria-pressed': String(!!g.lead), title: 'Highlight this as the strongest group',
+      class: 'rs-lead', type: 'button', 'aria-pressed': String(!!g.lead), 'aria-label': 'Top group', title: 'Highlight this as the strongest group',
       onclick: () => {
         const on = !g.lead;
         groups.forEach(x => { x.lead = false; });
@@ -2021,7 +2031,7 @@ function watchView(key) {
         renderBoard();
         changed();
       },
-    }, 'Top group');
+    }, 'Top');
     const removeGroup = h('button', {
       class: 'rs-x', type: 'button', 'aria-label': `Remove group ${g.name || ''}`.trim(), title: 'Remove group', html: ICON.trash,
       onclick: () => {
@@ -2061,11 +2071,87 @@ function watchView(key) {
   }, h('span', { html: ICON.plus }), 'Add group');
 
   function renderBoard() {
+    if (typeof syncExample === 'function') syncExample();
     grid.replaceChildren(...groups.map(cardFor), h('div', { class: 'rs-add' },
       groups.length ? null : h('p', null, 'Add the groups that are showing strength this week, with their leaders and one-week change.'),
       addGroupBtn));
   }
+  /* prices: one-week change for the week before this one, from Yahoo Finance through /api/quotes */
+  const priceStatus = h('span', { class: 'rs-status', role: 'status', 'aria-live': 'polite' });
+  const refreshBtn = h('button', { class: 'btn btn-sm btn-primary', type: 'button' }, 'Update from Yahoo Finance');
+  const exampleBtn = h('button', { class: 'btn btn-sm', type: 'button' }, 'Start with example groups');
+  const shortDay = iso => { const p = partsOf(iso); return `${MONTHS[p.m - 1].slice(0, 3)} ${p.d}`; };
+  const average = g => { const v = g.items.filter(i => i.change != null); return v.length ? v.reduce((t, i) => t + i.change, 0) / v.length : -Infinity; };
+
+  async function refreshPrices() {
+    const symbols = [...new Set(groups.flatMap(g => g.items.map(i => i.symbol)).filter(Boolean))];
+    if (!symbols.length) { toast('Add some tickers to the groups first.'); return; }
+    if (!syncOn) { toast('Live prices need the hosted site. Open the site on its web address.'); return; }
+    const end = addDays(key, -1); // the Sunday before this week: the board looks back at the week that just ended
+    refreshBtn.disabled = true;
+    priceStatus.textContent = 'Fetching prices…';
+    const found = {};
+    try {
+      for (let i = 0; i < symbols.length; i += 40) {
+        const part = symbols.slice(i, i + 40);
+        const res = await api(`/api/quotes?symbols=${encodeURIComponent(part.join(','))}&end=${end}`);
+        Object.assign(found, res.results || {});
+      }
+    } catch (err) {
+      priceStatus.textContent = '';
+      refreshBtn.disabled = false;
+      toast(err.status === 404 || err.status == null ? 'Prices are only available on the hosted site.'
+        : err.status === 401 || err.status === 403 ? 'Sign in again to load prices.'
+        : err.status === 503 ? 'Prices are not set up on the server yet.'
+        : 'Yahoo Finance did not answer. Try again in a minute.');
+      return;
+    }
+    const missing = [];
+    let updated = 0;
+    let from = '';
+    let to = '';
+    for (const g of groups) {
+      for (const it of g.items) {
+        if (!it.symbol) continue;
+        const r = found[it.symbol];
+        if (r && typeof r.change === 'number') {
+          it.change = r.change; updated++;
+          if (r.to.date > to) { to = r.to.date; from = r.from.date; }
+        } else missing.push(it.symbol);
+      }
+      g.items.sort(byChange);
+    }
+    // strongest group first, and highlighted
+    groups.sort((a, b) => (average(a) === average(b) ? 0 : average(b) - average(a)));
+    groups.forEach((g, i) => { g.lead = i === 0 && average(g) > -Infinity; });
+    if (from) caption.value = `1-week change, ${shortDay(from)} to ${shortDay(to)} closes`;
+    renderBoard();
+    changed();
+    refreshBtn.disabled = false;
+    const clock = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    priceStatus.textContent = `${plural(updated, 'ticker', 'tickers')} updated at ${clock} · Yahoo Finance`;
+    if (missing.length) toast(`No price found for ${[...new Set(missing)].slice(0, 6).join(', ')}`);
+  }
+  refreshBtn.addEventListener('click', refreshPrices);
+
+  const EXAMPLES = [
+    ['Power', 'TLN CEG VST NRG GEV'], ['Software', 'FSLY SHOP PLTR DDOG'], ['AI hardware', 'PENG HPE NTAP DELL'],
+    ['Cybersecurity', 'PANW NET CRWD'], ['Photonics', 'CIEN FN LITE AAOI COHR'],
+  ];
+  exampleBtn.addEventListener('click', () => {
+    if (groups.length) return;
+    EXAMPLES.forEach(([name, list]) => groups.push({
+      id: newId(), name, note: '', lead: false,
+      items: list.split(' ').map(symbol => ({ symbol, change: null })),
+    }));
+    renderBoard();
+    changed();
+    refreshPrices();
+  });
+  const syncExample = () => { exampleBtn.hidden = groups.length > 0; };
+
   renderBoard();
+  syncExample();
   countWords();
 
   const nodes = [
@@ -2075,6 +2161,7 @@ function watchView(key) {
         h('h2', { id: 'rsHead' }, 'Relative strength groups and leaders'),
         h('label', { class: 'sr-only', for: 'rsCaption' }, 'What the changes cover'),
         caption),
+      h('div', { class: 'rs-tools' }, refreshBtn, exampleBtn, priceStatus),
       grid,
       h('div', { class: 'rs-dropped-row' }, h('label', { for: 'rsDropped' }, 'Dropped off'), dropped)),
     h('section', { class: 'prep-main', 'aria-label': 'Plan for the week' },

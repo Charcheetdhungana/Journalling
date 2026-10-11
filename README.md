@@ -11,6 +11,8 @@ A private trading journal and notebook. Plain HTML, CSS and JavaScript, with no 
 | **Weekly recaps** | Per week (Monday to Sunday): trades taken, net profit or loss, winners and losers, win rate, a day-by-day table and every trade. All of it is worked out from the journal, nothing to type twice. Includes a free-text note for the week. |
 | **Weekly watch list** | Tickers to watch that week, each with a level or reason and a done tick. Carries unfinished tickers over from the previous week. |
 
+The watch list holds a **relative strength board** (groups, their leaders and one-week change) and a written plan for the week. **Update from Yahoo Finance** fills in the changes: it compares the last close of the week before with the close a week earlier, using Yahoo's public chart data through `functions/api/quotes.js`. That data is unofficial and has no key, so it can be rate limited or change without notice. Typing a change in by hand always works.
+
 A trade counts as **closed** once it has a sold price. Closed trades make up profit or loss and the win rate. A trade with no sold price is shown as **open** and left out of the totals until you fill it in.
 
 ## Run it
