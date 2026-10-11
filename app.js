@@ -1669,7 +1669,8 @@ function notebookView(sid, nid) {
 }
 
 /* ---------- Weeks: recap and watch list ---------- */
-/* One record per week, keyed by that week's Monday: { week, plan, recap, watch: [{ id, symbol, note, done }], updated }.
+/* One record per week, keyed by that week's Monday: { week, plan, recap, groups, boardNote, dropped, updated }.
+   (an older version also kept a plain `watch` ticker list; it is still carried along, just not shown.)
    plan is the week's preparation (HTML, with photos); recap is the note written after the week.
    The recap's trade counts and profit or loss are never stored. They are worked out from the
    journal entries every time the page opens, so they can't drift from what you wrote. */
@@ -1720,9 +1721,11 @@ function cleanWatch(list) {
 }
 
 const cleanWeek = (raw, week, updated) => ({
-  week, plan: cleanHTML(raw.plan), recap: String(raw.recap || '').slice(0, 20000), watch: cleanWatch(raw.watch), updated,
+  week, plan: cleanHTML(raw.plan), recap: String(raw.recap || '').slice(0, 20000),
+  groups: cleanGroups(raw.groups), boardNote: String(raw.boardNote || '').slice(0, 80), dropped: String(raw.dropped || '').slice(0, 300),
+  watch: cleanWatch(raw.watch), updated,
 });
-const weekRecord = key => weeks.get(key) || { week: key, plan: '', recap: '', watch: [], updated: 0 };
+const weekRecord = key => weeks.get(key) || { week: key, plan: '', recap: '', groups: [], boardNote: '', dropped: '', watch: [], updated: 0 };
 
 function saveWeek(rec) {
   rec.updated = Date.now();
@@ -1885,157 +1888,203 @@ async function recapView(key, token) {
   return { nodes: nodes.filter(Boolean), title: `Recap ${weekLabel(key)}`, mount() { $main.focus({ preventScroll: true }); } };
 }
 
-/* ---------- Weekly watch list: the week's preparation ---------- */
-/* A written plan for the week (text, headings, lists, photos) with the week's tickers beside it. */
+/* ---------- Weekly watch list: groups and leaders, plus the week's plan ---------- */
+/* The board lists the groups that are showing relative strength, each with its leaders and their
+   one-week change. Below it sits the written plan for the week (text and photos). */
 
-function weekRibbon(key) {
-  const now = todayParts();
-  return h('nav', { class: 'week-ribbon', 'aria-label': 'Days of this week' },
-    Array.from({ length: 7 }, (_, i) => {
-      const dk = addDays(key, i);
-      const p = partsOf(dk);
-      const mt = meta.get(dk);
-      const isToday = p.y === now.y && p.m === now.m && p.d === now.d;
-      const note = mt && mt.taken ? plural(mt.taken, 'trade', 'trades') : mt ? 'Entry' : '';
-      const spoken = `${WEEKDAYS[i]} ${p.d} ${MONTHS[p.m - 1]}${mt ? `, ${mt.title || 'entry written'}${mt.taken ? ', ' + plural(mt.taken, 'trade', 'trades') : ''}` : ', no entry yet'}`;
-      return h('a', {
-        class: ['day-chip', mt ? 'has' : '', isToday ? 'today' : ''].join(' ').trim(),
-        href: `#/${p.y}/${p.m}/${p.d}`, 'aria-label': spoken, 'aria-current': isToday ? 'date' : false,
-      },
-        h('span', { class: 'day-chip-dow' }, WEEKDAYS[i].slice(0, 3) + (i === 0 || p.d === 1 ? ' ' + MONTHS[p.m - 1].slice(0, 3) : '')),
-        h('span', { class: 'day-chip-num' }, String(p.d)),
-        h('span', { class: 'day-chip-note' }, note));
-    }));
+const MAX_GROUPS = 12;
+const MAX_LEADERS = 12;
+
+function cleanGroups(list) {
+  const out = (Array.isArray(list) ? list : []).slice(0, MAX_GROUPS).map(g => {
+    if (!g || typeof g !== 'object') return null;
+    const items = (Array.isArray(g.items) ? g.items : []).slice(0, MAX_LEADERS).map(it => {
+      if (!it || typeof it !== 'object') return null;
+      const symbol = cleanSymbol(it.symbol);
+      const change = typeof it.change === 'number' && Number.isFinite(it.change) && Math.abs(it.change) < 1e4 ? it.change : null;
+      return symbol || change != null ? { symbol, change } : null;
+    }).filter(Boolean);
+    const name = String(g.name || '').slice(0, 40);
+    const note = String(g.note || '').slice(0, 200);
+    if (!name.trim() && !note.trim() && !items.length) return null;
+    return { id: validId(g.id) ? g.id : newId(), name, note, items, lead: g.lead === true };
+  }).filter(Boolean);
+  let hasLead = false; // one highlighted group at most
+  for (const g of out) { if (g.lead && hasLead) g.lead = false; hasLead = hasLead || g.lead; }
+  return out;
 }
+
+function parseChange(text) {
+  const t = String(text).replace(/[%+\s,]/g, '').replace(/[−–]/g, '-');
+  if (t === '') return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : NaN;
+}
+const fmtChange = n => `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n).toFixed(1)}%`;
+const byChange = (a, b) => (b.change ?? -Infinity) - (a.change ?? -Infinity);
 
 function watchView(key) {
   const rec = weekRecord(key);
-  const list = rec.watch.map(x => ({ ...x }));
-  const status = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' }, rec.plan || list.length ? 'Saved' : '');
+  const groups = cleanGroups(rec.groups);
+  const status = h('span', { class: 'save-state', role: 'status', 'aria-live': 'polite' }, rec.plan || groups.length ? 'Saved' : '');
   const words = h('span');
 
   const saver = autosaver(async () => {
-    rec.plan = ed.stats().hasText || ed.stats().photos ? ed.serialize() : '';
-    rec.watch = cleanWatch(list);
+    const s = ed.stats();
+    rec.plan = s.hasText || s.photos ? ed.serialize() : '';
+    rec.groups = cleanGroups(groups);
+    rec.boardNote = caption.value.slice(0, 80);
+    rec.dropped = dropped.value.slice(0, 300);
     await saveWeek(rec);
   }, status);
+  const changed = () => saver.touch();
 
   const ed = richEditor({
     html: rec.plan,
     label: 'Plan for the week',
-    placeholder: 'Write your plan for the week: what you expect, the levels that matter, what you will trade and what you will leave alone. Use Add photo to drop in chart screenshots.',
-    onChange: () => { countWords(); saver.touch(); },
+    placeholder: 'Write the plan for the week: what you expect, the levels that matter, what you will trade and what you will leave alone. Use Add photo to drop in chart screenshots.',
+    onChange: () => { countWords(); changed(); },
   });
   function countWords() {
     const s = ed.stats();
     words.textContent = plural(s.words, 'word', 'words') + (s.photos ? ` · ${plural(s.photos, 'photo', 'photos')}` : '');
   }
-  const changed = () => { updateSummary(); saver.touch(); };
   const unhook = hookPageHide(saver);
   activeEditor = { async flush() { unhook(); ed.destroy(); await saver.run(); } };
 
-  /* tickers */
-  const summary = h('p', { class: 'watch-summary' });
-  const ul = h('ul', { class: 'watch-list' });
-  const empty = h('p', { class: 'recap-empty' }, 'No tickers yet. Add the symbols you want to watch, with the level or the reason.');
-  const carry = h('button', { class: 'btn btn-sm', type: 'button' });
+  /* board */
+  const grid = h('div', { class: 'rs-grid' });
+  const caption = h('input', {
+    class: 'rs-caption', type: 'text', maxlength: 80, autocomplete: 'off', spellcheck: 'true',
+    placeholder: 'e.g. 1-week change to Oct 9', 'aria-label': 'What the changes cover',
+  });
+  caption.value = rec.boardNote || '';
+  caption.addEventListener('input', changed);
+  const dropped = h('input', {
+    class: 'rs-dropped', id: 'rsDropped', type: 'text', maxlength: 300, autocomplete: 'off', spellcheck: 'true',
+    placeholder: 'Groups that lost strength, e.g. semis (LRCX −8.2%)',
+  });
+  dropped.value = rec.dropped || '';
+  dropped.addEventListener('input', changed);
 
-  const carryCandidates = () => {
-    const have = new Set(list.map(x => x.symbol).filter(Boolean));
-    return weekRecord(addDays(key, -7)).watch.filter(x => x.symbol && !x.done && !have.has(x.symbol));
-  };
+  function cardFor(g) {
+    const rows = h('ul', { class: 'rs-rows' });
+    const card = h('article', { class: 'rs-card' + (g.lead ? ' lead' : ''), 'aria-label': g.name || 'Group' });
 
-  function updateSummary() {
-    const real = list.filter(x => x.symbol || x.note.trim());
-    const done = real.filter(x => x.done).length;
-    summary.textContent = real.length ? `${plural(real.length, 'ticker', 'tickers')} · ${done} done` : '';
-    empty.hidden = list.length > 0;
-    const c = carryCandidates();
-    carry.hidden = !c.length;
-    carry.textContent = c.length ? `Carry over ${plural(c.length, 'ticker', 'tickers')} from last week` : '';
+    const renderRows = () => {
+      rows.replaceChildren(...g.items.map(it => {
+        const sym = h('input', {
+          class: 'rs-symbol', type: 'text', maxlength: 12, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false',
+          placeholder: 'Symbol', 'aria-label': 'Symbol',
+        });
+        sym.value = it.symbol;
+        sym.addEventListener('input', () => { sym.value = sym.value.toUpperCase(); it.symbol = cleanSymbol(sym.value); changed(); });
+        const chg = h('input', {
+          class: 'rs-change', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '%', 'aria-label': 'Change in percent',
+        });
+        const paint = () => { chg.classList.toggle('win', it.change > 0); chg.classList.toggle('loss', it.change < 0); };
+        chg.value = it.change == null ? '' : fmtChange(it.change);
+        paint();
+        chg.addEventListener('focus', () => { chg.value = it.change == null ? '' : String(it.change); chg.select(); });
+        chg.addEventListener('input', () => {
+          const n = parseChange(chg.value);
+          chg.setAttribute('aria-invalid', Number.isNaN(n) ? 'true' : 'false');
+          if (!Number.isNaN(n)) { it.change = n; paint(); changed(); }
+        });
+        chg.addEventListener('change', () => { // done typing: show it formatted and put the strongest first
+          chg.setAttribute('aria-invalid', 'false');
+          g.items.sort(byChange);
+          renderRows();
+          changed();
+        });
+        const del = h('button', {
+          class: 'rs-x', type: 'button', 'aria-label': `Remove ${it.symbol || 'this ticker'}`, title: 'Remove', html: ICON.close,
+          onclick: () => { g.items.splice(g.items.indexOf(it), 1); renderRows(); changed(); },
+        });
+        return h('li', { class: 'rs-row' }, sym, chg, del);
+      }));
+    };
+    renderRows();
+
+    const name = h('input', {
+      class: 'rs-name', type: 'text', maxlength: 40, autocomplete: 'off', spellcheck: 'true', placeholder: 'Group name', 'aria-label': 'Group name',
+    });
+    name.value = g.name;
+    name.addEventListener('input', () => { g.name = name.value; card.setAttribute('aria-label', g.name || 'Group'); changed(); });
+
+    const lead = h('button', {
+      class: 'rs-lead', type: 'button', 'aria-pressed': String(!!g.lead), title: 'Highlight this as the strongest group',
+      onclick: () => {
+        const on = !g.lead;
+        groups.forEach(x => { x.lead = false; });
+        g.lead = on;
+        renderBoard();
+        changed();
+      },
+    }, 'Top group');
+    const removeGroup = h('button', {
+      class: 'rs-x', type: 'button', 'aria-label': `Remove group ${g.name || ''}`.trim(), title: 'Remove group', html: ICON.trash,
+      onclick: () => {
+        if (g.items.length && !window.confirm(`Remove “${g.name || 'this group'}” and its ${plural(g.items.length, 'ticker', 'tickers')}?`)) return;
+        groups.splice(groups.indexOf(g), 1);
+        renderBoard();
+        changed();
+      },
+    });
+    const addRow = h('button', {
+      class: 'rs-add-row', type: 'button',
+      onclick: () => {
+        if (g.items.length >= MAX_LEADERS) { toast(`A group holds up to ${MAX_LEADERS} tickers.`); return; }
+        g.items.push({ symbol: '', change: null });
+        renderRows();
+        rows.lastElementChild?.querySelector('.rs-symbol')?.focus();
+      },
+    }, h('span', { html: ICON.plus }), 'Add ticker');
+    const note = h('textarea', {
+      class: 'rs-note', rows: 2, maxlength: 200, spellcheck: 'true', placeholder: 'What drove the group', 'aria-label': 'Note for this group',
+    });
+    note.value = g.note;
+    note.addEventListener('input', () => { g.note = note.value; changed(); });
+
+    card.append(h('div', { class: 'rs-card-head' }, name, lead, removeGroup), rows, addRow, note);
+    return card;
   }
 
-  function rowFor(item) {
-    const li = h('li', { class: 'watch-item' + (item.done ? ' done' : '') });
-    const done = h('input', {
-      type: 'checkbox', checked: item.done, 'aria-label': 'Done with this one',
-      onchange: e => { item.done = e.target.checked; li.classList.toggle('done', item.done); changed(); },
-    });
-    const sym = h('input', {
-      class: 'watch-symbol', type: 'text', maxlength: 12, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false',
-      placeholder: 'Symbol', 'aria-label': 'Symbol',
-    });
-    sym.value = item.symbol;
-    sym.addEventListener('input', () => { sym.value = sym.value.toUpperCase(); item.symbol = cleanSymbol(sym.value); changed(); });
-    const note = h('input', {
-      class: 'watch-note', type: 'text', maxlength: 500, autocomplete: 'off', spellcheck: 'true',
-      placeholder: 'Level, setup or reason', 'aria-label': 'Notes for this ticker',
-    });
-    note.value = item.note;
-    note.addEventListener('input', () => { item.note = note.value; changed(); });
-    const del = h('button', {
-      class: 'icon-btn bordered', type: 'button', html: ICON.trash, 'aria-label': 'Remove from list', title: 'Remove from list',
-      onclick: () => { list.splice(list.indexOf(item), 1); renderList(); changed(); },
-    });
-    li.append(done, sym, note, del);
-    return li;
+  const addGroupBtn = h('button', {
+    class: 'btn rs-add-group', type: 'button',
+    onclick: () => {
+      if (groups.length >= MAX_GROUPS) { toast(`A week's board holds up to ${MAX_GROUPS} groups.`); return; }
+      groups.push({ id: newId(), name: '', note: '', items: [{ symbol: '', change: null }], lead: false });
+      renderBoard();
+      grid.lastElementChild?.previousElementSibling?.querySelector('.rs-name')?.focus();
+    },
+  }, h('span', { html: ICON.plus }), 'Add group');
+
+  function renderBoard() {
+    grid.replaceChildren(...groups.map(cardFor), h('div', { class: 'rs-add' },
+      groups.length ? null : h('p', null, 'Add the groups that are showing strength this week, with their leaders and one-week change.'),
+      addGroupBtn));
   }
-
-  function renderList() {
-    ul.replaceChildren(...list.map(rowFor));
-    updateSummary();
-  }
-
-  const addSymbol = h('input', {
-    id: 'watchAddSymbol', class: 'watch-symbol', type: 'text', maxlength: 12, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false',
-    placeholder: 'Symbol', 'aria-label': 'Symbol to add',
-  });
-  addSymbol.addEventListener('input', () => { addSymbol.value = addSymbol.value.toUpperCase(); });
-  const addNote = h('input', {
-    class: 'watch-note', type: 'text', maxlength: 500, autocomplete: 'off', spellcheck: 'true',
-    placeholder: 'Level, setup or reason (optional)', 'aria-label': 'Notes for the ticker to add',
-  });
-  const addForm = h('form', { class: 'watch-add', 'aria-label': 'Add a ticker' }, addSymbol, addNote,
-    h('button', { class: 'btn btn-primary', type: 'submit' }, h('span', { html: ICON.plus }), 'Add'));
-  addForm.addEventListener('submit', e => {
-    e.preventDefault();
-    const symbol = cleanSymbol(addSymbol.value);
-    const text = addNote.value.trim();
-    if (!symbol && !text) { addSymbol.focus(); return; }
-    if (list.length >= MAX_WATCH) { toast(`A week's list holds up to ${MAX_WATCH} tickers.`); return; }
-    list.push({ id: newId(), symbol, note: text, done: false });
-    addSymbol.value = '';
-    addNote.value = '';
-    renderList();
-    changed();
-    addSymbol.focus();
-  });
-  carry.addEventListener('click', () => {
-    const c = carryCandidates().slice(0, MAX_WATCH - list.length);
-    c.forEach(x => list.push({ id: newId(), symbol: x.symbol, note: x.note, done: false }));
-    renderList();
-    changed();
-    toast(`Carried over ${plural(c.length, 'ticker', 'tickers')}`);
-  });
-
-  renderList();
+  renderBoard();
   countWords();
 
   const nodes = [
     weekHead('watch', key),
-    weekRibbon(key),
-    h('div', { class: 'prep' },
-      h('section', { class: 'prep-main', 'aria-label': 'Plan for the week' },
-        ed.toolbar, ed.wrap,
-        h('div', { class: 'day-foot' }, words, status)),
-      h('aside', { class: 'prep-side', 'aria-label': 'Tickers to watch' },
-        h('h2', { class: 'section-head' }, 'Tickers to watch'),
-        addForm,
-        h('div', { class: 'watch-bar' }, summary, h('span', { class: 'nb-spacer' }), carry),
-        ul, empty)),
+    h('section', { class: 'rs-board', 'aria-labelledby': 'rsHead' },
+      h('div', { class: 'rs-head' },
+        h('h2', { id: 'rsHead' }, 'Relative strength groups and leaders'),
+        h('label', { class: 'sr-only', for: 'rsCaption' }, 'What the changes cover'),
+        caption),
+      grid,
+      h('div', { class: 'rs-dropped-row' }, h('label', { for: 'rsDropped' }, 'Dropped off'), dropped)),
+    h('section', { class: 'prep-main', 'aria-label': 'Plan for the week' },
+      h('h2', { class: 'section-head' }, 'Plan for the week'),
+      ed.toolbar, ed.wrap,
+      h('div', { class: 'day-foot' }, words, status)),
     h('div', { class: 'recap-links' },
       h('a', { class: 'btn', href: `#/recap/${key}` }, 'See this week’s recap')),
   ];
+  caption.id = 'rsCaption';
   return { nodes, title: `Watch list ${weekLabel(key)}`, mount() { $main.focus({ preventScroll: true }); } };
 }
 
