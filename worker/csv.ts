@@ -1,3 +1,4 @@
+import { priceToCsv } from '../src/lib/money'
 import type { Trade } from '../src/lib/schemas'
 
 const HEADERS = [
@@ -45,12 +46,12 @@ export function tradesToCsv(trades: readonly Trade[]): string {
         csvText(t.ticker),
         t.instrument,
         t.direction,
-        dollars(t.strikeCents),
+        priceToCsv(t.strikeE4),
         t.expiration ?? '',
         t.contracts === null ? '' : String(t.contracts),
         t.shares === null ? '' : String(t.shares),
-        dollars(t.entryPriceCents),
-        dollars(t.exitPriceCents),
+        priceToCsv(t.entryPriceE4),
+        priceToCsv(t.exitPriceE4),
         t.entryTime ?? '',
         t.exitTime ?? '',
         dollars(t.feesCents),

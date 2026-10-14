@@ -89,8 +89,8 @@ export function TradesPage() {
       </div>
 
       <Card className="p-4">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-          <div className="relative sm:col-span-2">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+          <div className="relative col-span-2">
             <label htmlFor="trade-search" className="sr-only">
               Search ticker, setup or tag
             </label>
@@ -137,7 +137,7 @@ export function TradesPage() {
               ))}
             </select>
           </div>
-          <div className="sm:col-span-2 lg:col-span-2">
+          <div className="col-span-2">
             <label htmlFor="f-tag" className="label">
               Tag
             </label>

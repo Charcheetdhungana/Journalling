@@ -19,7 +19,7 @@ import { useSettings, useTrades } from '../hooks/queries'
 import { useUi } from '../providers'
 import { CumulativeChart, ChartCard } from '../components/charts'
 import { StatsPanel, useStats } from '../components/StatsPanel'
-import { Button, Card, ErrorState, Money, Skeleton } from '../components/ui'
+import { Button, Card, ErrorState, Money, ResponsiveMoney, Skeleton } from '../components/ui'
 
 export function MonthView() {
   const params = useParams()
@@ -140,7 +140,7 @@ function MonthContent({ year, month }: { year: number; month: number }) {
                       <span className="num text-xs font-medium sm:text-sm">{day}</span>
                       {pnl !== undefined && (
                         <span className="flex flex-col">
-                          <Money cents={pnl} className="text-[10px] font-semibold !text-fg sm:text-sm" />
+                          <ResponsiveMoney cents={pnl} className="text-[10px] font-semibold !text-fg sm:text-sm" />
                           <span className="num hidden text-xs text-fg/70 sm:block">
                             {count} {count === 1 ? 'trade' : 'trades'}
                           </span>

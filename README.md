@@ -14,7 +14,7 @@ trades table and stats. It is **only a journal** (no broker connection, no live 
 npm install
 npm run dev        # applies local DB migrations, then starts http://localhost:5173
 npm test           # unit tests (Vitest)
-npm run build      # type-check + production build into dist/
+npm run build      # type-check + production build into dist/, then verifies nothing local-only ships
 ```
 
 Locally the app uses a simulated D1 and R2 stored in `.wrangler/state/`, and `.dev.vars`
@@ -29,7 +29,7 @@ See [DEPLOY.md](DEPLOY.md) for the step-by-step guide (D1, R2, custom domain, Cl
 
 | Data | Location |
 | --- | --- |
-| Trades, day notes, settings | D1 database `trade-journal` (money as integer cents, dates as `YYYY-MM-DD` text) |
+| Trades, day notes, settings | D1 database `trade-journal` (P&L and fees as integer cents; prices and strikes as integers in 1/10000 dollar; dates as `YYYY-MM-DD` text) |
 | Screenshots | R2 bucket `trade-journal-screenshots` (only the object key is kept in D1) |
 
 Nothing is stored in browser storage, so it is identical on every device and survives clearing the browser.
@@ -50,7 +50,9 @@ confirmation dialog and *replaces* all current data in one database transaction.
 - Profit factor = sum of winning P&L / |sum of losing P&L|; “—” when there are no losses.
 - Streaks are by trade in date/time order; a Breakeven trade ends a streak.
 - Win / Loss / Breakeven is the **Result** you choose (auto-suggested from the P&L sign), not the sign itself.
-- Prices, strike, fees and P&L are stored in cents, so prices are rounded to the nearest cent.
+- P&L and fees are integer cents. Entry/exit price and strike keep 4 decimal places (integer units of 1/10000 dollar), so a $0.0512 stock x 100,000 shares calculates exactly. Auto-calculate works on integers and rounds only the final result to a cent (half away from zero).
+- An exact zero is shown as `$0.00` with no sign; other amounts always show + or -.
+- Backups are version 2. Version 1 backups (prices in cents) are upgraded automatically on import.
 
 ## Project layout
 

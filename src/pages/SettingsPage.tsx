@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Download, FileSpreadsheet, FlaskConical, Trash2, Upload } from 'lucide-react'
 import { api } from '../api'
+import { upgradeBackup } from '../lib/backup'
 import { backupSchema } from '../lib/schemas'
 import { generateSampleTrades } from '../lib/sample'
 import { useSaveSettings, useSettings } from '../hooks/queries'
@@ -71,7 +72,7 @@ export function SettingsPage() {
       } catch {
         throw new Error('That file is not valid JSON')
       }
-      const parsed = backupSchema.safeParse(raw)
+      const parsed = backupSchema.safeParse(upgradeBackup(raw))
       if (!parsed.success) {
         const first = parsed.error.issues[0]
         throw new Error(

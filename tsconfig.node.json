@@ -19,6 +19,7 @@
     "vite.config.ts",
     "vitest.config.ts",
     "vitest.global-setup.ts",
-    "tailwind.config.ts"
+    "tailwind.config.ts",
+    "tests"
   ]
 }

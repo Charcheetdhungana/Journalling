@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { ZodType } from 'zod'
 import { requireAccess } from './auth'
+import { upgradeBackup } from '../src/lib/backup'
 import { tradesToCsv } from './csv'
 import {
   TRADE_COLUMNS,
@@ -347,7 +348,7 @@ function decodeDataUrl(dataUrl: string): { bytes: Uint8Array; kind: ImageKind } 
 }
 
 app.post('/api/import', async (c) => {
-  const backup = parse(backupSchema, await readJson(c.req.raw))
+  const backup = parse(backupSchema, upgradeBackup(await readJson(c.req.raw)))
   const screenshots = backup.screenshots ?? {}
 
   // Restore images first, so the database never references a missing object.

@@ -119,8 +119,12 @@ function DayPanelContent({ date, onClose }: { date: string; onClose: () => void 
               <X className="h-5 w-5" aria-hidden />
             </Button>
           </div>
-          <div className="mt-3 grid grid-cols-3 gap-2">
-            <StatTile label="Net P&L" value={<Money cents={stats.netPnlCents} />} />
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <StatTile
+              label="Net P&L"
+              value={<Money cents={stats.netPnlCents} />}
+              className="col-span-2 sm:col-span-1"
+            />
             <StatTile label="Trades" value={stats.totalTrades} />
             <StatTile label="Win rate" value={formatPercent(stats.winRate, 0)} />
           </div>

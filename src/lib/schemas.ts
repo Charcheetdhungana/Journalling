@@ -12,6 +12,8 @@ export type Result = (typeof RESULTS)[number]
 export const isoDate = z.string().refine(isValidISODate, 'Must be a valid date in YYYY-MM-DD format')
 const timeString = z.string().refine(isValidTime, 'Must be a time in HH:mm format')
 const cents = z.number().int().min(-10_000_000_000).max(10_000_000_000)
+/** Prices and strikes: integer units of 1/10000 dollar (4 decimal places). */
+const priceE4 = z.number().int().min(0).max(10_000_000_000)
 const longText = z.string().max(5000)
 
 /** Trade fields the client sends (money in integer cents). */
@@ -26,12 +28,12 @@ export const tradeInputSchema = z.object({
     .transform((s) => s.toUpperCase()),
   instrument: z.enum(INSTRUMENTS),
   direction: z.enum(DIRECTIONS),
-  strikeCents: cents.nullable(),
+  strikeE4: priceE4.nullable(),
   expiration: isoDate.nullable(),
   contracts: z.number().int().min(0).max(1_000_000).nullable(),
   shares: z.number().int().min(0).max(1_000_000_000).nullable(),
-  entryPriceCents: cents.nullable(),
-  exitPriceCents: cents.nullable(),
+  entryPriceE4: priceE4.nullable(),
+  exitPriceE4: priceE4.nullable(),
   entryTime: timeString.nullable(),
   exitTime: timeString.nullable(),
   feesCents: cents.min(0),
@@ -88,7 +90,7 @@ export const bulkTradesSchema = z.object({
   trades: z.array(tradeInputSchema).min(1).max(1000),
 })
 
-export const BACKUP_VERSION = 1
+export const BACKUP_VERSION = 2
 
 export const backupSchema = z.object({
   app: z.literal('trade-journal'),

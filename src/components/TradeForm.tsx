@@ -3,7 +3,7 @@ import { Calculator, ImagePlus, Loader2, Trash2, X } from 'lucide-react'
 import { api, screenshotUrl } from '../api'
 import { calculatePnlCents, suggestResult } from '../lib/calc'
 import { isValidISODate, todayISO } from '../lib/dates'
-import { centsToInput, parseDollarInput } from '../lib/money'
+import { centsToInput, parseDollarInput, parsePriceInput, priceToInput } from '../lib/money'
 import {
   DEFAULT_TAGS,
   DIRECTIONS,
@@ -56,12 +56,12 @@ function initialState(target: TradeFormTarget): FormState {
       ticker: source.ticker,
       instrument: source.instrument,
       direction: source.direction,
-      strike: centsToInput(source.strikeCents),
+      strike: priceToInput(source.strikeE4),
       expiration: source.expiration ?? '',
       contracts: source.contracts === null ? '' : String(source.contracts),
       shares: source.shares === null ? '' : String(source.shares),
-      entryPrice: centsToInput(source.entryPriceCents),
-      exitPrice: centsToInput(source.exitPriceCents),
+      entryPrice: priceToInput(source.entryPriceE4),
+      exitPrice: priceToInput(source.exitPriceE4),
       entryTime: source.entryTime ?? '',
       exitTime: source.exitTime ?? '',
       fees: centsToInput(source.feesCents),
@@ -248,8 +248,8 @@ function TradeFormContent({ target }: { target: TradeFormTarget }) {
   }
 
   const autoCalculate = () => {
-    const entry = parseDollarInput(form.entryPrice)
-    const exit = parseDollarInput(form.exitPrice)
+    const entry = parsePriceInput(form.entryPrice)
+    const exit = parsePriceInput(form.exitPrice)
     const quantity = parseInteger(isOption ? form.contracts : form.shares)
     const fees = form.fees.trim() === '' ? 0 : parseDollarInput(form.fees)
     const missing: string[] = []
@@ -264,8 +264,8 @@ function TradeFormContent({ target }: { target: TradeFormTarget }) {
     const pnl = calculatePnlCents({
       instrument: form.instrument,
       direction: form.direction,
-      entryPriceCents: entry,
-      exitPriceCents: exit,
+      entryPriceE4: entry,
+      exitPriceE4: exit,
       quantity,
       feesCents: fees,
     })
@@ -342,8 +342,8 @@ function TradeFormContent({ target }: { target: TradeFormTarget }) {
 
     const optionalMoney = (raw: string, field: keyof FormState, label: string): number | null => {
       if (raw.trim() === '') return null
-      const v = parseDollarInput(raw)
-      if (v === null || v < 0) e[field] = `${label} must be a positive number`
+      const v = parsePriceInput(raw)
+      if (v === null) e[field] = `${label} must be a positive number`
       return v
     }
     const strike = isOption ? optionalMoney(form.strike, 'strike', 'Strike') : null
@@ -378,12 +378,12 @@ function TradeFormContent({ target }: { target: TradeFormTarget }) {
       ticker,
       instrument: form.instrument,
       direction: form.direction,
-      strikeCents: strike,
+      strikeE4: strike,
       expiration: isOption && form.expiration ? form.expiration : null,
       contracts,
       shares,
-      entryPriceCents: entryPrice,
-      exitPriceCents: exitPrice,
+      entryPriceE4: entryPrice,
+      exitPriceE4: exitPrice,
       entryTime: form.entryTime || null,
       exitTime: form.exitTime || null,
       feesCents: fees,

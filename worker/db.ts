@@ -6,12 +6,12 @@ export interface TradeRow {
   ticker: string
   instrument: Trade['instrument']
   direction: Trade['direction']
-  strike_cents: number | null
+  strike_e4: number | null
   expiration: string | null
   contracts: number | null
   shares: number | null
-  entry_price_cents: number | null
-  exit_price_cents: number | null
+  entry_price_e4: number | null
+  exit_price_e4: number | null
   entry_time: string | null
   exit_time: string | null
   fees_cents: number
@@ -46,12 +46,12 @@ export function rowToTrade(row: TradeRow): Trade {
     ticker: row.ticker,
     instrument: row.instrument,
     direction: row.direction,
-    strikeCents: row.strike_cents,
+    strikeE4: row.strike_e4,
     expiration: row.expiration,
     contracts: row.contracts,
     shares: row.shares,
-    entryPriceCents: row.entry_price_cents,
-    exitPriceCents: row.exit_price_cents,
+    entryPriceE4: row.entry_price_e4,
+    exitPriceE4: row.exit_price_e4,
     entryTime: row.entry_time,
     exitTime: row.exit_time,
     feesCents: row.fees_cents,
@@ -70,8 +70,8 @@ export function rowToTrade(row: TradeRow): Trade {
   }
 }
 
-export const TRADE_COLUMNS = `id, date, ticker, instrument, direction, strike_cents, expiration, contracts, shares,
-  entry_price_cents, exit_price_cents, entry_time, exit_time, fees_cents, pnl_cents, result, setup, tags,
+export const TRADE_COLUMNS = `id, date, ticker, instrument, direction, strike_e4, expiration, contracts, shares,
+  entry_price_e4, exit_price_e4, entry_time, exit_time, fees_cents, pnl_cents, result, setup, tags,
   why_taken, went_well, went_wrong, lesson, rating, screenshot_key, created_at, updated_at`
 
 const INSERT_SQL = `INSERT INTO trades (${TRADE_COLUMNS}) VALUES (${Array.from({ length: 26 }, () => '?').join(', ')})`
@@ -85,12 +85,12 @@ export function insertTradeStatement(db: D1Database, trade: Trade): D1PreparedSt
       trade.ticker,
       trade.instrument,
       trade.direction,
-      trade.strikeCents,
+      trade.strikeE4,
       trade.expiration,
       trade.contracts,
       trade.shares,
-      trade.entryPriceCents,
-      trade.exitPriceCents,
+      trade.entryPriceE4,
+      trade.exitPriceE4,
       trade.entryTime,
       trade.exitTime,
       trade.feesCents,
@@ -112,8 +112,8 @@ export function insertTradeStatement(db: D1Database, trade: Trade): D1PreparedSt
 export function updateTradeStatement(db: D1Database, id: string, input: TradeInput, updatedAt: string): D1PreparedStatement {
   return db
     .prepare(
-      `UPDATE trades SET date = ?, ticker = ?, instrument = ?, direction = ?, strike_cents = ?, expiration = ?,
-        contracts = ?, shares = ?, entry_price_cents = ?, exit_price_cents = ?, entry_time = ?, exit_time = ?,
+      `UPDATE trades SET date = ?, ticker = ?, instrument = ?, direction = ?, strike_e4 = ?, expiration = ?,
+        contracts = ?, shares = ?, entry_price_e4 = ?, exit_price_e4 = ?, entry_time = ?, exit_time = ?,
         fees_cents = ?, pnl_cents = ?, result = ?, setup = ?, tags = ?, why_taken = ?, went_well = ?,
         went_wrong = ?, lesson = ?, rating = ?, screenshot_key = ?, updated_at = ?
        WHERE id = ?`,
@@ -123,12 +123,12 @@ export function updateTradeStatement(db: D1Database, id: string, input: TradeInp
       input.ticker,
       input.instrument,
       input.direction,
-      input.strikeCents,
+      input.strikeE4,
       input.expiration,
       input.contracts,
       input.shares,
-      input.entryPriceCents,
-      input.exitPriceCents,
+      input.entryPriceE4,
+      input.exitPriceE4,
       input.entryTime,
       input.exitTime,
       input.feesCents,

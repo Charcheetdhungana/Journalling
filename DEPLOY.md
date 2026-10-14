@@ -33,6 +33,8 @@ The bucket name is already `trade-journal-screenshots` in the same file.
 npm run db:migrate:remote
 ```
 
+This applies `0001_init.sql` and `0002_price_precision.sql` (prices and strikes to 1/10000 dollar units). Run it again whenever new migration files are added.
+
 ## 4. Deploy
 
 Do steps 5 and 6 first if you want to be safe: until Access is configured the API refuses all
@@ -97,6 +99,7 @@ opens the app. Every `/api/*` request is additionally verified in the Worker: th
 - `npm run dev` uses `.dev.vars` with `DEV_BYPASS_AUTH=true`. That file is git-ignored and is never
   uploaded. Do **not** add `DEV_BYPASS_AUTH` to `wrangler.jsonc` or to dashboard variables. Even if
   it were set in production, the Worker only honours it when the request host is `localhost`.
+- `npm run build` strips any `.dev.vars` copied into `dist/` and fails if `DEV_BYPASS_AUTH` appears in the deploy config.
 - To run the same migrations locally: `npm run db:migrate:local` (done automatically by `npm run dev`).
 
 ## Backups

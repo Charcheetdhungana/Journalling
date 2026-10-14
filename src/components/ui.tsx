@@ -1,6 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import { Star } from 'lucide-react'
-import { formatMoney } from '../lib/money'
+import { formatCompactMoney, formatMoney } from '../lib/money'
 import type { Result } from '../lib/schemas'
 import { useSettings } from '../hooks/queries'
 
@@ -15,9 +15,37 @@ export function pnlColorClass(cents: number): string {
   return 'text-be'
 }
 
+/** Inter's tabular-figures feature widens + and -, which leaves a gap before the $. Render the sign untabulated. */
+function SignedAmount({ text }: { text: string }) {
+  const first = text.charAt(0)
+  if (first !== '+' && first !== '-') return <>{text}</>
+  return (
+    <>
+      <span style={{ fontVariantNumeric: 'normal' }}>{first}</span>
+      {text.slice(1)}
+    </>
+  )
+}
+
 export function Money({ cents, className = '' }: { cents: number; className?: string }) {
   const money = useMoney()
-  return <span className={`num ${pnlColorClass(cents)} ${className}`}>{money(cents)}</span>
+  return <span className={`num ${pnlColorClass(cents)} ${className}`}><SignedAmount text={money(cents)} /></span>
+}
+
+/** Full amount from the sm breakpoint up, a short form (+8.8k) on phones where cells are narrow. */
+export function ResponsiveMoney({ cents, className = '' }: { cents: number; className?: string }) {
+  const { settings } = useSettings()
+  const money = useMoney()
+  return (
+    <span className={`num ${pnlColorClass(cents)} ${className}`} title={money(cents)}>
+      <span className="sm:hidden">
+        <SignedAmount text={formatCompactMoney(cents, settings.currencySymbol)} />
+      </span>
+      <span className="hidden sm:inline">
+        <SignedAmount text={money(cents)} />
+      </span>
+    </span>
+  )
 }
 
 type Variant = 'primary' | 'secondary' | 'danger' | 'ghost'
