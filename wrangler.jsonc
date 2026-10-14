@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "trade-journal",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-06-01",
+
+  // The app must only be reachable through your custom domain (behind Cloudflare Access).
+  "workers_dev": false,
+  "preview_urls": false,
+
+  // Uncomment and edit after DEPLOY.md step 5 (or attach the domain in the dashboard instead).
+  // "routes": [{ "pattern": "journal.YOUR-DOMAIN.com", "custom_domain": true }],
+
+  "assets": {
+    "not_found_handling": "single-page-application",
+    // Only /api/* runs the Worker first; everything else is served from static assets.
+    "run_worker_first": ["/api/*"]
+  },
+
+  "vars": {
+    // Cloudflare Zero Trust team name: https://<TEAM_NAME>.cloudflareaccess.com
+    "TEAM_NAME": "REPLACE_WITH_TEAM_NAME",
+    // Application Audience (AUD) tag of your Access application
+    "ACCESS_AUD": "REPLACE_WITH_ACCESS_AUD"
+    // DEV_BYPASS_AUTH must never be set here. It lives only in .dev.vars (local, git-ignored).
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "trade-journal",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "SCREENSHOTS",
+      "bucket_name": "trade-journal-screenshots"
+    }
+  ]
+}

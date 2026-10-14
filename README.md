@@ -1,41 +1,63 @@
-# Daybook
+# Trade Journal
 
-A private trading journal and notebook. Plain HTML, CSS and JavaScript, with no build step.
+A trading journal for US stocks and options: calendar (year and month), day panel, trade form,
+trades table and stats. It is **only a journal** (no broker connection, no live data).
 
-## Areas
+- Frontend: Vite + React + TypeScript + Tailwind, date-fns, recharts, lucide-react, TanStack Query
+- Backend: one Cloudflare Worker (Hono) serving the built app and a JSON API under `/api/*`
+- Data: Cloudflare **D1** (SQL) for trades, day notes and settings; **R2** for screenshots
+- Auth: Cloudflare Access in front of your domain; the Worker also verifies the Access JWT on every `/api/*` call
 
-| Nav item | What it does |
+## Run it locally
+
+```bash
+npm install
+npm run dev        # applies local DB migrations, then starts http://localhost:5173
+npm test           # unit tests (Vitest)
+npm run build      # type-check + production build into dist/
+```
+
+Locally the app uses a simulated D1 and R2 stored in `.wrangler/state/`, and `.dev.vars`
+(`DEV_BYPASS_AUTH=true`) skips the Access check **only for requests to `localhost`**.
+Open **Settings → Load sample data** to see it populated.
+
+## Deploy
+
+See [DEPLOY.md](DEPLOY.md) for the step-by-step guide (D1, R2, custom domain, Cloudflare Access).
+
+## Where data is stored
+
+| Data | Location |
 | --- | --- |
-| **Journal** | One entry per day, browsed by year and month. Each day holds a title, mood, text, photos and a **trade log** (any number of trades). |
-| **Notebook** | Sections and topics for everything that is not a daily entry. |
-| **Weekly recaps** | Per week (Monday to Sunday): trades taken, net profit or loss, winners and losers, win rate, a day-by-day table and every trade. All of it is worked out from the journal, nothing to type twice. Includes a free-text note for the week. |
-| **Weekly watch list** | Tickers to watch that week, each with a level or reason and a done tick. Carries unfinished tickers over from the previous week. |
+| Trades, day notes, settings | D1 database `trade-journal` (money as integer cents, dates as `YYYY-MM-DD` text) |
+| Screenshots | R2 bucket `trade-journal-screenshots` (only the object key is kept in D1) |
 
-The watch list holds a **relative strength board** (groups, their leaders and one-week change) and a written plan for the week. **Update from Yahoo Finance** fills in the changes: it compares the last close of the week before with the close a week earlier, using Yahoo's public chart data through `functions/api/quotes.js`. That data is unofficial and has no key, so it can be rate limited or change without notice. Typing a change in by hand always works.
+Nothing is stored in browser storage, so it is identical on every device and survives clearing the browser.
 
-A trade counts as **closed** once it has a sold price. Closed trades make up profit or loss and the win rate. A trade with no sold price is shown as **open** and left out of the totals until you fill it in.
+## Back up and restore
 
-## Run it
+**Settings → Export backup (.json)** downloads everything (trades, day notes, settings and
+screenshots embedded as images). **Settings → Import backup** loads such a file after a
+confirmation dialog and *replaces* all current data in one database transaction.
+**Export trades (.csv)** gives a spreadsheet of trades.
 
-Open `index.html` in a browser, or serve the folder:
+## Rules the app follows
+
+- Dates are plain local `YYYY-MM-DD` strings, parsed only with date-fns (never `new Date("YYYY-MM-DD")`),
+  so a trade logged on the 14th always shows on the 14th, including in Australian timezones.
+  The test suite runs in `Australia/Sydney` to prove it.
+- Win rate = Wins / (Wins + Losses); breakeven excluded; shows “—” when there is nothing to divide.
+- Profit factor = sum of winning P&L / |sum of losing P&L|; “—” when there are no losses.
+- Streaks are by trade in date/time order; a Breakeven trade ends a streak.
+- Win / Loss / Breakeven is the **Result** you choose (auto-suggested from the P&L sign), not the sign itself.
+- Prices, strike, fees and P&L are stored in cents, so prices are rounded to the nearest cent.
+
+## Project layout
 
 ```
-npx serve .
+worker/        Hono API (auth, trades, notes, settings, screenshots, import/export)
+migrations/    D1 SQL migrations
+src/lib/       pure logic: stats.ts, dates.ts, money.ts, calc.ts, schemas.ts (all unit-tested)
+src/pages/     Year, Month, Trades, Stats, Settings
+src/components Day panel, trade form, charts, layout
 ```
-
-Data is stored in the browser (IndexedDB), per address. `file://`, `localhost` and your live site are three separate stores, so use **Download backup** and **Restore from backup** (bottom of the Journal page) to move data between them.
-
-## Sync across devices (optional)
-
-`functions/api` is a Cloudflare Pages Function that syncs everything through a KV namespace, behind Cloudflare Access.
-
-1. Create a Cloudflare Pages project from this repository (no build command, output directory `/`).
-2. Create a KV namespace and bind it to the project as `DAYBOOK`.
-3. Protect the site with a Cloudflare Access application.
-4. Add the variables `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` and, optionally, `ALLOWED_EMAIL`.
-
-Without these the app still works, and the top bar shows "Sync not set up".
-
-## Data keys
-
-`e:YYYY-MM-DD` journal entry, `w:YYYY-MM-DD` week (recap note and watch list, keyed by its Monday), `s:<id>` notebook section, `n:<id>` notebook topic.
